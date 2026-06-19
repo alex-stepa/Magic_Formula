@@ -5,7 +5,7 @@
 // je beze změny, takže UTF-8 (např. v textech) zůstane v pořádku — ASCII tokeny
 // (závorky, čárky) mají bajty < 128, takže se nepletou s vícebajtovými znaky.
 
-use crate::veh::{Beam, Node};
+use crate::veh::{Beam, Node, Wheel};
 use serde_json::Value;
 
 /// Projde naparsovaný jbeam (strom Value) a vytáhne NODY ze všech partů,
@@ -85,10 +85,53 @@ pub fn extract_beams(root: &Value) -> Vec<Beam> {
     beams
 }
 
+/// Vytáhne KOLA ze všech partů, co mají sekci "pressureWheels".
+/// Řádek dat: ["name","hubGroup","group","node1","node2","nodeS","nodeArm","wheelDir", {…}].
+/// Bereme sloupce 0 (name), 3 (node1), 4 (node2), 7 (wheelDir). Hlavičku přeskočíme
+/// (skip(1)), {modifikátory} taky (nejsou pole).
+pub fn extract_wheels(root: &Value) -> Vec<Wheel> {
+    let mut wheels = Vec::new();
+    let Some(parts) = root.as_object() else {
+        return wheels;
+    };
+    for part in parts.values() {
+        let Some(rows) = part.get("pressureWheels").and_then(|n| n.as_array()) else {
+            continue;
+        };
+        for row in rows.iter().skip(1) {
+            let Some(arr) = row.as_array() else {
+                continue; // {modifikátory} přeskoč
+            };
+            let (Some(name), Some(node1), Some(node2), Some(dir)) = (
+                arr.first().and_then(|v| v.as_str()),
+                arr.get(3).and_then(|v| v.as_str()),
+                arr.get(4).and_then(|v| v.as_str()),
+                arr.get(7).and_then(|v| v.as_i64()),
+            ) else {
+                continue;
+            };
+            wheels.push(Wheel {
+                name: name.to_string(),
+                node1: node1.to_string(),
+                node2: node2.to_string(),
+                dir: dir as i32,
+            });
+        }
+    }
+    wheels
+}
+
 /// Hlavní funkce: .jbeam text → validní JSON text.
 pub fn to_json(input: &str) -> String {
     let step1 = strip_comments_and_insert_commas(input);
-    remove_trailing_commas(&step1)
+    // Obalit { } MUSÍ být PŘED odstraněním trailing čárek — jinak by čárka na konci
+    // souboru (před nově přidanou }) zůstala a serde_json by ji odmítl.
+    let wrapped = if step1.trim_start().starts_with('{') {
+        step1
+    } else {
+        format!("{{{step1}}}")
+    };
+    remove_trailing_commas(&wrapped)
 }
 
 /// 1) smaže komentáře (mimo uvozovky)
@@ -134,7 +177,14 @@ fn strip_comments_and_insert_commas(input: &str) -> String {
         //   - byl mezi tímhle a předchozím tokenem oddělovač (gap) — jinak by se to
         //     vkládalo i mezi číslice jednoho čísla (4200) nebo písmena `true`,
         //   - tenhle token začíná hodnotu A předchozí token hodnotu končil.
-        if gap && starts_value(c) && ends_value(last_sig) {
+        // Čárku vložíme když: token končí hodnotu a další ji začíná, A buď
+        //   - byla mezi nimi mezera (gap), NEBO
+        //   - je to JEDNOZNAČNÝ přechod (uvozovka/závorka), který nemůže být uprostřed
+        //     tokenu — třeba `0.4"flashPoint"` nebo `}{`. (U dvou alfanum znaků bez mezery
+        //     to NEVKLÁDÁME, jinak bychom rozbili číslo `1e5` nebo `4200`.)
+        let unambiguous = matches!(c, b'"' | b'{' | b'[')
+            || matches!(last_sig, b'}' | b']' | b'"');
+        if (gap || unambiguous) && starts_value(c) && ends_value(last_sig) {
             out.push(b',');
         }
         gap = false;

@@ -12,10 +12,21 @@ use serde::{Deserialize, Serialize};
 /// Celé vozidlo — kořen .veh souboru.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Vehicle {
-    pub name: String,    // jméno auta (např. "fabia")
-    pub version: u32,    // verze formátu (teď 1)
-    pub nodes: Vec<Node>, // hmotné body
-    pub beams: Vec<Beam>, // pružné spoje mezi nody
+    pub name: String,      // jméno auta (např. "fabia")
+    pub version: u32,      // verze formátu (teď 1)
+    pub nodes: Vec<Node>,  // hmotné body
+    pub beams: Vec<Beam>,  // pružné spoje mezi nody
+    pub wheels: Vec<Wheel>, // kola
+}
+
+/// Jedno kolo. Nemá vlastní pozici — visí na dvou OSOVÝCH uzlech (node1, node2),
+/// jejich poloha určí, kde a jak je kolo orientované.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Wheel {
+    pub name: String,  // jméno kola (např. "FR")
+    pub node1: String, // první osový uzel
+    pub node2: String, // druhý osový uzel
+    pub dir: i32,      // strana/směr (1 = jedna strana, -1 = druhá)
 }
 
 /// Jeden hmotný bod (node).
