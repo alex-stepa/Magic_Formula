@@ -14,6 +14,11 @@ enum CameraMode {
     Follow, // kamera připnutá na auto
 }
 
+// Marker komponenta (bez dat) — jen označí, která entita je tělo auta.
+// Podle ní si v systému řízení najdeme auto a otáčíme s ním.
+#[derive(Component)]
+struct Chassis;
+
 // Komponenta = "štítek s daty" na entitě. Tahle značí, že entita je kolo.
 // Podle ní půjde kola najít a build system bude měnit jejich parametry.
 // allow(dead_code): pole zatím jen zapisujeme; číst je budou systémy v dalších krocích.
@@ -44,7 +49,7 @@ fn main() {
         // Startup = spustí se jednou na začátku (postaví scénu).
         .add_systems(Startup, setup)
         // Update = spustí se každý snímek (reaguje na vstup).
-        .add_systems(Update, camera_mode)
+        .add_systems(Update, (camera_mode, vehicle_drive, vehicle_steer))
         .run();
 }
 
@@ -71,15 +76,18 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
     // Pozici auta si uložíme, ať ji použijeme pro auto i pro výpočet pozic kol.
     let car_pos = Vec3::new(0.0, 3.0, 0.0);
 
-    // Auto (placeholder): červený kvádr 2×0.5×4 + fyzika. Spuštěné z výšky, ať je vidět pád.
+    // Auto (placeholder): červený kvádr 1.5×0.5×4 + fyzika. Užší než stopa kol,
+    // aby přední (i zadní) kola stála volně vedle těla = prostor místo "výřezu".
     // .id() vrátí Entity (identitu auta). Uložíme si ji — joints kol ji potřebují.
     let chassis = commands
         .spawn((
-            Mesh3d(meshes.add(Cuboid::new(2.0, 0.5, 4.0))),
+            Mesh3d(meshes.add(Cuboid::new(1.5, 0.5, 4.0))),
             MeshMaterial3d(materials.add(Color::srgb(0.8, 0.2, 0.2))),
             Transform::from_translation(car_pos),
         ))
         .insert(physics::car_physics())
+        .insert(Chassis)            // marker, ať auto najdeme v řízení
+        .insert(Velocity::default()) // umožní číst/nastavit rychlost auta
         .id();
 
     // Společné parametry kol — později přijdou z .veh souboru (build system).
@@ -109,17 +117,75 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
             .insert(physics::wheel_physics(wheel_radius, wheel_width))
             .insert(Wheel { radius: wheel_radius, driven, steered })
             .insert(physics::Suspension::Rigid) // typ zavěšení (data pro build system)
-            // Joint připne kolo k chassis. `offset` je bod uchycení na autě.
-            .insert(physics::wheel_joint(physics::Suspension::Rigid, chassis, offset))
-            .with_children(|parent| {
+            // Joint: kolo → chassis. U řízených kol půjde rám jointu za běhu natáčet.
+            .insert(physics::wheel_joint(physics::Suspension::Rigid, chassis, offset, steered))
+            .with_children(|builder| {
                 // Mesh válce jako DÍTĚ, otočené o 90° → kolo vizuálně "leží" (osa X).
                 // Otáčíme jen vzhled, ne tělo, takže osa jointu zůstane správná.
-                parent.spawn((
+                builder.spawn((
                     Mesh3d(meshes.add(Cylinder::new(wheel_radius, wheel_width))),
                     MeshMaterial3d(materials.add(Color::srgb(0.1, 0.1, 0.1))),
                     Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
                 ));
             });
+    }
+}
+
+// Pohon auta: plyn (W), zpátečka (S), brzda (mezerník). Běží každý snímek.
+// Query nám dá VŠECHNA kola: pár (data Wheel, jeho joint k autu).
+// Motor jointu roztáčí volnou osu kola na zadanou cílovou rychlost.
+fn vehicle_drive(keys: Res<ButtonInput<KeyCode>>, mut wheels: Query<(&Wheel, &mut ImpulseJoint)>) {
+    // Cílová úhlová rychlost otáčení kola (rad/s). Znaménko určuje směr.
+    let mut target_speed = 0.0;
+    if keys.pressed(KeyCode::KeyW) {
+        target_speed = 80.0; // plyn vpřed (vyšší = vyšší maximálka)
+    } else if keys.pressed(KeyCode::KeyS) {
+        target_speed = -80.0; // zpátečka
+    }
+    let braking = keys.pressed(KeyCode::Space);
+
+    // Síla motoru = jak silně
+    // tlačí kola na cílovou rychlost (~tah / zrychlení).
+    let engine_power = 100.0;
+
+    for (wheel, mut joint) in &mut wheels {
+        if !wheel.driven {
+            continue; // motor dáváme jen na hnaná (zadní) kola
+        }
+        // (cílová_rychlost, factor) — factor = jak silně motor tlačí kolo na cíl.
+        let (vel, factor) = if braking {
+            (0.0, 8.0) // brzda: drž rychlost na nule, silně
+        } else {
+            (target_speed, engine_power)
+        };
+        // joint.data je TypedJoint (enum). Vytáhneme revolute variantu a roztočíme ji.
+        if let TypedJoint::RevoluteJoint(revolute) = &mut joint.data {
+            revolute.set_motor_velocity(vel, factor);
+        }
+    }
+}
+
+// Řízení (kinematické): A/D natáčí RÁM jointu řízených kol kolem Y.
+// Tím se natočí osa valení → kolo se s ní natočí. Je to pevná geometrie, ne síla,
+// takže se točí kola (ne trup) a nic se neklepe.
+fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, mut wheels: Query<(&Wheel, &mut ImpulseJoint)>) {
+    // Maximální úhel zatočení v radiánech (~0.5 rad ≈ 28°).
+    let max_angle = 0.5;
+    let mut steer_angle = 0.0;
+    if keys.pressed(KeyCode::KeyA) {
+        steer_angle = max_angle; // doleva
+    } else if keys.pressed(KeyCode::KeyD) {
+        steer_angle = -max_angle; // doprava
+    }
+
+    for (wheel, mut joint) in &mut wheels {
+        if !wheel.steered {
+            continue; // natáčíme jen přední (řízená) kola
+        }
+        // Řízené kolo má generic joint — otočíme jeho rám (local_basis1) kolem Y.
+        if let TypedJoint::GenericJoint(generic) = &mut joint.data {
+            generic.set_local_basis1(Quat::from_rotation_y(steer_angle));
+        }
     }
 }
 

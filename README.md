@@ -121,7 +121,7 @@ src/
 - [ ] `.veh` loader (deserializace do ECS entit)
 - [ ] Chassis jako rapier rigid body
 - [x] 4 kola s rapier joints
-- [ ] Základní input (plyn, brzda, řízení)
+- [x] Základní input (plyn, brzda, řízení)
 - [ ] Volná kamera (WASD + myš) + follow kamera
 
 ### Co základ NENÍ
