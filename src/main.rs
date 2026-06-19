@@ -6,14 +6,6 @@ use bevy_rapier3d::prelude::*; // fyzika: RapierPhysicsPlugin, RigidBody, Collid
 
 mod physics; // načte modul z src/physics.rs (fyzikální komponenty)
 
-// Resource = globální data sdílená celou hrou (jen jedna instance).
-// Sem si držíme, v jakém režimu je kamera.
-#[derive(Resource)]
-enum CameraMode {
-    Free,   // volná kamera (poletíš si kam chceš)
-    Follow, // kamera připnutá na auto
-}
-
 // Marker komponenta (bez dat) — jen označí, která entita je tělo auta.
 // Podle ní si v systému řízení najdeme auto a otáčíme s ním.
 #[derive(Component)]
@@ -44,12 +36,10 @@ fn main() {
         }))
         // Zapne fyzikální simulaci (gravitace, srážky). Od teď rapier hýbe tělesy.
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
-        // Vloží náš resource do hry s počáteční hodnotou Free.
-        .insert_resource(CameraMode::Free)
         // Startup = spustí se jednou na začátku (postaví scénu).
         .add_systems(Startup, setup)
         // Update = spustí se každý snímek (reaguje na vstup).
-        .add_systems(Update, (camera_mode, vehicle_drive, vehicle_steer))
+        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera))
         .run();
 }
 
@@ -189,21 +179,25 @@ fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, mut wheels: Query<(&Wheel, &mu
     }
 }
 
-// Přepíná režim kamery při stisku C. Běží každý snímek (Update).
-// ResMut<CameraMode> = můžeme režim měnit. Res<ButtonInput<KeyCode>> = stav kláves.
-fn camera_mode(mut camera_mode: ResMut<CameraMode>, keys: Res<ButtonInput<KeyCode>>) {
-    // just_pressed = reaguje jen na okamžik stisku, ne na držení.
-    if keys.just_pressed(KeyCode::KeyC) {
-        // Podle aktuálního režimu přepneme na ten druhý.
-        match *camera_mode {
-            CameraMode::Free => {
-                *camera_mode = CameraMode::Follow;
-                println!("Follow");
-            }
-            CameraMode::Follow => {
-                *camera_mode = CameraMode::Free;
-                println!("Free");
-            }
-        }
-    }
+// Chase kamera: drží se za autem podle jeho směru a kouká na něj.
+// Dva dotazy na Transform: auto čteme, kameru měníme. `Without<Chassis>` u kamery
+// říká Bevy, že to NEJSOU stejné entity (jinak by dva přístupy k Transform neprošly).
+fn follow_camera(
+    car: Query<&Transform, With<Chassis>>,
+    mut camera: Query<&mut Transform, (With<Camera3d>, Without<Chassis>)>,
+) {
+    // get_single = čekáme přesně jedno auto a jednu kameru; jinak nic neděláme.
+    let Ok(car_tf) = car.get_single() else { return; };
+    let Ok(mut cam_tf) = camera.get_single_mut() else { return; };
+
+    // Směr, kam auto míří (jeho lokální +Z ve světě). Vynulujeme Y → bereme jen
+    // otočení kolem svislé osy (yaw), aby kamera nepodlétla zem při náklonu/skoku.
+    let mut heading = car_tf.rotation * Vec3::Z;
+    heading.y = 0.0;
+    let heading = heading.normalize_or_zero();
+
+    // Kamera za auto (proti směru jízdy) a nahoru, pak namíříme na auto.
+    let offset = -heading * 12.0 + Vec3::Y * 5.0;
+    cam_tf.translation = car_tf.translation + offset;
+    cam_tf.look_at(car_tf.translation, Vec3::Y);
 }

@@ -115,14 +115,13 @@ src/
 ### `magic-formula` základ (3–4 týdny)
 - [x] Bevy projekt setup + bevy_rapier3d
 - [x] Okno, kamera, světlo, ground plane, auto placeholder
-- [x] CameraMode enum (Free/Follow) s přepínáním na C
 - [x] Modulární struktura (physics.rs)
 - [x] Collider na zem + RigidBody na auto
 - [ ] `.veh` loader (deserializace do ECS entit)
-- [ ] Chassis jako rapier rigid body
+- [x] Chassis jako rapier rigid body
 - [x] 4 kola s rapier joints
 - [x] Základní input (plyn, brzda, řízení)
-- [ ] Volná kamera (WASD + myš) + follow kamera
+- [x] Chase kamera za autem (volná WASD kamera vynechána — nepotřebná)
 
 ### Co základ NENÍ
 - ❌ Real OSM lokace
