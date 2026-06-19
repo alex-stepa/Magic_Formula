@@ -107,10 +107,10 @@ src/
 ## Základ na léto (scope)
 
 ### `jbeam-rs` (2–3 týdny)
-- [ ] Parsování `.jbeam` souboru (json5 crate)
-- [ ] Konverze nodes, beams, wheels do `.veh`
-- [ ] CLI: `jbeam-rs input.jbeam -o output.veh`
-- [ ] Test na Škoda Fabia souboru
+- [x] Parsování `.jbeam` souboru (vlastní preprocess — jbeam má chybějící čárky, ne čistý json5)
+- [ ] Konverze nodes, beams, **wheels** do `.veh` (nodes + beams hotové, wheels zbývají)
+- [x] CLI: `jbeam-rs input.jbeam -o output.veh`
+- [x] Test na Škoda Fabia souboru (part `fabia_body`)
 
 ### `magic-formula` základ (3–4 týdny)
 - [x] Bevy projekt setup + bevy_rapier3d

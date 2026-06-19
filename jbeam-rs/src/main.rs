@@ -1,31 +1,59 @@
 // jbeam-rs — konvertor BeamNG .jbeam → vlastní .veh formát.
 
-mod jbeam; // preprocess .jbeam → validní JSON
+mod jbeam; // preprocess .jbeam → validní JSON + extrakce nodů/beamů
 mod veh; // datové structy .veh formátu
 
+use clap::Parser;
+use std::path::PathBuf;
+
+/// Konvertor BeamNG .jbeam → vlastní .veh formát.
+/// clap z tohohle structu sám vyrobí parsování argumentů i `--help`.
+#[derive(Parser)]
+#[command(name = "jbeam-rs", about = "Konvertor BeamNG .jbeam → .veh")]
+struct Args {
+    /// Vstupní .jbeam soubor
+    input: PathBuf,
+
+    /// Výstupní .veh soubor
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// Jméno vozidla v .veh (výchozí = název vstupního souboru)
+    #[arg(short, long)]
+    name: Option<String>,
+}
+
 fn main() {
-    // Zatím natvrdo testujeme na jednom partu; CLI přidáme později.
-    let path = "samples/fabia/vehicles/fabia/fabia_body.jbeam";
+    let args = Args::parse();
 
-    let raw = std::fs::read_to_string(path).expect("nepodařilo se přečíst soubor");
+    // Načti a převeď .jbeam na validní JSON, pak na strom Value.
+    let raw = std::fs::read_to_string(&args.input).expect("nepodařilo se přečíst vstupní soubor");
     let json = jbeam::to_json(&raw);
-
-    // Naparsujeme do obecného stromu Value (ne pevných structů — vstup je nepravidelný).
     let value: serde_json::Value = serde_json::from_str(&json).expect("nevalidní JSON po preprocess");
 
-    // Vytáhneme nody a beamy a poskládáme z nich vozidlo.
+    // Jméno auta: buď z --name, nebo z názvu souboru (bez přípony).
+    let name = args.name.unwrap_or_else(|| {
+        args.input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("vehicle")
+            .to_string()
+    });
+
+    // Poskládej vozidlo a zapiš .veh.
     let vehicle = veh::Vehicle {
-        name: "fabia".to_string(),
+        name,
         version: 1,
         nodes: jbeam::extract_nodes(&value),
         beams: jbeam::extract_beams(&value),
     };
-
-    // Serializujeme do .veh (hezky odsazený JSON) a zapíšeme.
     let out = serde_json::to_string_pretty(&vehicle).expect("serializace .veh selhala");
-    std::fs::write("fabia.veh", &out).expect("zápis fabia.veh selhal");
+    std::fs::write(&args.output, &out).expect("zápis výstupního souboru selhal");
+
     println!(
-        "Hotovo → fabia.veh ({} nodů, {} beamů)",
+        "Hotovo: {} → {} ({} nodů, {} beamů)",
+        args.input.display(),
+        args.output.display(),
         vehicle.nodes.len(),
         vehicle.beams.len()
     );
