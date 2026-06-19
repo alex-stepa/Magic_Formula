@@ -117,10 +117,10 @@ src/
 - [x] Okno, kamera, světlo, ground plane, auto placeholder
 - [x] CameraMode enum (Free/Follow) s přepínáním na C
 - [x] Modulární struktura (physics.rs)
-- [ ] Collider na zem + RigidBody na auto
+- [x] Collider na zem + RigidBody na auto
 - [ ] `.veh` loader (deserializace do ECS entit)
 - [ ] Chassis jako rapier rigid body
-- [ ] 4 kola s rapier joints
+- [x] 4 kola s rapier joints
 - [ ] Základní input (plyn, brzda, řízení)
 - [ ] Volná kamera (WASD + myš) + follow kamera
 
