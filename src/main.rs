@@ -2,6 +2,9 @@
 // Tady se sestaví Bevy App, zapnou pluginy a zaregistrují systémy.
 
 use bevy::prelude::*;          // základ Bevy: App, Commands, Transform, Component...
+use bevy::render::mesh::Indices; // indexy trojúhelníků pro mesh
+use bevy::render::render_asset::RenderAssetUsages; // mesh zůstane i v main světě (ať ho updatujeme)
+use bevy::render::render_resource::PrimitiveTopology; // TriangleList
 use bevy_rapier3d::prelude::*; // fyzika: RapierPhysicsPlugin, RigidBody, Collider...
 
 mod physics; // načte modul z src/physics.rs (fyzikální komponenty)
@@ -40,7 +43,7 @@ fn main() {
         // Startup = spustí se jednou na začátku (postaví scénu).
         .add_systems(Startup, setup)
         // Update = spustí se každý snímek (reaguje na vstup).
-        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera, spawn_buttons, spawn_shortcuts, toggle_menu))
+        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera, spawn_buttons, spawn_shortcuts, toggle_menu, update_softbody_mesh))
         .run();
 }
 
@@ -87,6 +90,13 @@ struct MenuToggleButton;
 // Panel s volbami (rozbalovací) — přepíná se jeho zobrazení.
 #[derive(Component)]
 struct MenuPanel;
+
+// Povrchový mesh soft-body. Drží pro každý vrchol odpovídající node entitu,
+// aby update systém mohl vrcholy posouvat za pohybem nodů (deformace).
+#[derive(Component)]
+struct SoftbodyMesh {
+    nodes: Vec<Entity>, // vertex i ↔ node entita
+}
 
 // Seznam dostupných .veh souborů ve složce assets (seřazený) — UI i klávesy berou stejný.
 fn available_vehs() -> Vec<std::path::PathBuf> {
@@ -368,6 +378,66 @@ fn spawn_softbody(
         commands.entity(a).with_children(|child| {
             child.spawn(ImpulseJoint::new(b, spring));
         });
+    }
+
+    // --- Povrch z trojúhelníků: deformující se mesh, jehož vrcholy sledují nody ---
+    // Vrchol i = node v pořadí vehicle.nodes; mapa id → index vrcholu.
+    let mut vert_of: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    let mut vertex_positions: Vec<[f32; 3]> = Vec::with_capacity(vehicle.nodes.len());
+    let mut vertex_nodes: Vec<Entity> = Vec::with_capacity(vehicle.nodes.len());
+    for (i, node) in vehicle.nodes.iter().enumerate() {
+        vert_of.insert(node.id.as_str(), i as u32);
+        let p = origin + veh_pos(node.pos);
+        vertex_positions.push([p.x, p.y, p.z]);
+        vertex_nodes.push(node_entity[node.id.as_str()]);
+    }
+    // Indexy z trojúhelníků (přeskoč ty, co odkazují na neznámý nod).
+    let mut indices: Vec<u32> = Vec::new();
+    for tri in &vehicle.triangles {
+        if let (Some(&a), Some(&b), Some(&c)) = (
+            vert_of.get(tri.a.as_str()),
+            vert_of.get(tri.b.as_str()),
+            vert_of.get(tri.c.as_str()),
+        ) {
+            indices.extend([a, b, c]);
+        }
+    }
+    if !indices.is_empty() {
+        // RenderAssetUsages::all() = mesh zůstane i v main světě, ať ho můžeme každý snímek měnit.
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::all());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertex_positions);
+        mesh.insert_indices(Indices::U32(indices));
+        mesh.compute_normals();
+        commands.spawn((
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(materials.add(Color::srgb(0.75, 0.75, 0.8))),
+            Transform::IDENTITY,
+            SoftbodyMesh { nodes: vertex_nodes },
+            Spawned,
+        ));
+    }
+}
+
+// Každý snímek přepíše vrcholy povrchu na aktuální pozice nodů → mesh se deformuje s soft-body.
+fn update_softbody_mesh(
+    surfaces: Query<(&SoftbodyMesh, &Mesh3d)>,
+    transforms: Query<&Transform>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    for (surface, mesh3d) in &surfaces {
+        let Some(mesh) = meshes.get_mut(&mesh3d.0) else {
+            continue;
+        };
+        let positions: Vec<[f32; 3]> = surface
+            .nodes
+            .iter()
+            .map(|&e| {
+                let p = transforms.get(e).map(|t| t.translation).unwrap_or(Vec3::ZERO);
+                [p.x, p.y, p.z]
+            })
+            .collect();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.compute_normals();
     }
 }
 

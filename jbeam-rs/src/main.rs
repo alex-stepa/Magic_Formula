@@ -40,6 +40,7 @@ fn main() {
     let mut nodes = Vec::new();
     let mut beams = Vec::new();
     let mut wheels = Vec::new();
+    let mut triangles = Vec::new();
 
     for file in &files {
         let raw = std::fs::read_to_string(file).expect("nepodařilo se přečíst soubor");
@@ -55,6 +56,7 @@ fn main() {
         nodes.extend(jbeam::extract_nodes(&value));
         beams.extend(jbeam::extract_beams(&value));
         wheels.extend(jbeam::extract_wheels(&value));
+        triangles.extend(jbeam::extract_triangles(&value));
     }
 
     // BeamNG party stejný nod často REDEFINUJÍ (override). Sloučíme nody podle id —
@@ -83,16 +85,18 @@ fn main() {
         nodes,
         beams,
         wheels,
+        triangles,
     };
     let out = serde_json::to_string_pretty(&vehicle).expect("serializace .veh selhala");
     std::fs::write(&args.output, &out).expect("zápis výstupního souboru selhal");
 
     println!(
-        "Hotovo: {} souborů → {} ({} nodů, {} beamů, {} kol)",
+        "Hotovo: {} souborů → {} ({} nodů, {} beamů, {} kol, {} trojúhelníků)",
         files.len(),
         args.output.display(),
         vehicle.nodes.len(),
         vehicle.beams.len(),
-        vehicle.wheels.len()
+        vehicle.wheels.len(),
+        vehicle.triangles.len()
     );
 }

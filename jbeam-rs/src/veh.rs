@@ -14,9 +14,18 @@ use serde::{Deserialize, Serialize};
 pub struct Vehicle {
     pub name: String,      // jméno auta (např. "fabia")
     pub version: u32,      // verze formátu (teď 1)
-    pub nodes: Vec<Node>,  // hmotné body
-    pub beams: Vec<Beam>,  // pružné spoje mezi nody
-    pub wheels: Vec<Wheel>, // kola
+    pub nodes: Vec<Node>,         // hmotné body
+    pub beams: Vec<Beam>,         // pružné spoje mezi nody
+    pub wheels: Vec<Wheel>,       // kola
+    pub triangles: Vec<Triangle>, // plochy (pro vykreslení povrchu)
+}
+
+/// Trojúhelník povrchu — odkazuje na tři nody přes jejich id.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Triangle {
+    pub a: String,
+    pub b: String,
+    pub c: String,
 }
 
 /// Jedno kolo. Nemá vlastní pozici — visí na dvou OSOVÝCH uzlech (node1, node2),

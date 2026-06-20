@@ -5,7 +5,39 @@
 // je beze změny, takže UTF-8 (např. v textech) zůstane v pořádku — ASCII tokeny
 // (závorky, čárky) mají bajty < 128, takže se nepletou s vícebajtovými znaky.
 
-use crate::veh::{Beam, Node, Wheel};
+use crate::veh::{Beam, Node, Triangle, Wheel};
+
+/// Vytáhne TROJÚHELNÍKY (povrch) — řádek je ["id1","id2","id3"]. Hlavičku ["id1:","id2:","id3:"]
+/// přeskočíme (skip(1)), {modifikátory} vypadnou na as_array().
+pub fn extract_triangles(root: &Value) -> Vec<Triangle> {
+    let mut tris = Vec::new();
+    let Some(parts) = root.as_object() else {
+        return tris;
+    };
+    for part in parts.values() {
+        let Some(rows) = part.get("triangles").and_then(|n| n.as_array()) else {
+            continue;
+        };
+        for row in rows.iter().skip(1) {
+            let Some(arr) = row.as_array() else {
+                continue;
+            };
+            let (Some(a), Some(b), Some(c)) = (
+                arr.first().and_then(|v| v.as_str()),
+                arr.get(1).and_then(|v| v.as_str()),
+                arr.get(2).and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            tris.push(Triangle {
+                a: a.to_string(),
+                b: b.to_string(),
+                c: c.to_string(),
+            });
+        }
+    }
+    tris
+}
 use serde_json::Value;
 
 /// Projde naparsovaný jbeam (strom Value) a vytáhne NODY ze všech partů,

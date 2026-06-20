@@ -15,6 +15,16 @@ pub struct Vehicle {
     pub beams: Vec<Beam>,
     #[serde(default)] // kdyby .veh sekci wheels neměl, bude prázdná
     pub wheels: Vec<Wheel>,
+    #[serde(default)]
+    pub triangles: Vec<Triangle>,
+}
+
+/// Trojúhelník povrchu — tři node id. Vrcholy meshe sledují pozice těchto nodů.
+#[derive(Debug, Deserialize)]
+pub struct Triangle {
+    pub a: String,
+    pub b: String,
+    pub c: String,
 }
 
 #[derive(Debug, Deserialize)]
