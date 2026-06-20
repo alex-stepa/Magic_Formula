@@ -41,9 +41,12 @@ fn main() {
         // Zapne fyzikální simulaci (gravitace, srážky). Od teď rapier hýbe tělesy.
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         // Startup = spustí se jednou na začátku (postaví scénu).
+        .init_resource::<SoftBody>()
         .add_systems(Startup, setup)
-        // Update = spustí se každý snímek (reaguje na vstup).
-        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera, spawn_buttons, spawn_shortcuts, toggle_menu, update_softbody_mesh))
+        // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
+        .add_systems(FixedUpdate, softbody_solve)
+        // Update = spustí se každý snímek (reaguje na vstup, zapisuje pozice do meshe).
+        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera, spawn_buttons, spawn_shortcuts, toggle_menu, softbody_to_transforms, update_softbody_mesh).chain())
         .run();
 }
 
@@ -96,6 +99,133 @@ struct MenuPanel;
 #[derive(Component)]
 struct SoftbodyMesh {
     nodes: Vec<Entity>, // vertex i ↔ node entita
+}
+
+// --- VLASTNÍ SOFT-BODY SOLVER (Fáze 2) ---
+// Stav soft-body držíme my, ne rapier. Structure-of-Arrays: index i = jeden nod,
+// pole pos/vel/inv_mass/force jsou paralelní (cache-friendly, beamy odkazují indexem).
+#[derive(Resource, Default)]
+struct SoftBody {
+    pos: Vec<Vec3>,        // pozice nodu i (světové)
+    vel: Vec<Vec3>,        // rychlost nodu i
+    inv_mass: Vec<f32>,    // 1/m (předpočítané; 0 = ukotvený nod)
+    force: Vec<Vec3>,      // akumulátor sil (čistí se každý substep)
+    beams: Vec<BeamC>,     // pružiny mezi indexy
+    wheels: Vec<WheelC>,   // kola (každé = hub-node + stav pneumatiky)
+    entities: Vec<Entity>, // node index i ↔ render entita (zápis Transformu)
+    substeps: u32,         // kolik integračních kroků na snímek (adaptivně dle nejtužšího beamu)
+}
+
+// Beam ve solveru — indexy do polí výše (ne Entity ani String), REÁLNÁ tuhost z .veh.
+struct BeamC {
+    i: usize,
+    j: usize,
+    rest: f32, // klidová délka
+    k: f32,    // tuhost (bez škálování)
+    d: f32,    // tlumení
+}
+
+// --- KOLA NA SOLVERU (jednotný model: kolo = node v SoftBody s bohatším kontaktem) ---
+// Princip rozšiřitelnosti: všechno tady jsou DATA, ne konstanty v kódu. Tuning part / custom
+// díly časem jen přepíšou tahle čísla; solver se nemění. Pérování NENÍ tady — to jsou beamy,
+// které postaví builder zavěšení (viz SuspensionKind) → různé geometrie bez zásahu do solveru.
+// allow(dead_code): spin_vel/driven/steered/grip zatím jen zapisujeme při spawnu —
+// číst je bude TIRE MODEL (krok 2: pohon, brzda, řízení, boční grip). Schválně už teď,
+// ať je datový tvar kola hotový a builder se příště nemusí měnit.
+#[allow(dead_code)]
+struct WheelC {
+    hub: usize,        // index hub-nodu v SoftBody (na něm visí pérovací beamy do těla)
+    render: Entity,    // entita disku kola (zápis Transformu: pozice hubu + spin + steer)
+    radius: f32,
+    spin: f32,         // úhel natočení kola (rad) — pro render i výpočet kontaktu
+    spin_vel: f32,     // úhlová rychlost valení (rad/s) — pohon/brzda (krok 2)
+    steer: f32,        // aktuální natočení řízení (rad), nastaví vehicle_steer (krok 2)
+    driven: bool,      // pohání ho motor? (krok 2)
+    steered: bool,     // natáčí se s ním? (krok 2)
+    tire: TireParams,  // model pneumatiky — izolovaná data, ať jde vyměnit za Pacejku
+}
+
+// Parametry pneumatiky = data. Teď jen svislá tuhost/tlumení (auto sedí na kolech);
+// `grip` použije boční/podélný tire model v kroku 2. Časem sem přijdou Pacejka koeficienty.
+#[allow(dead_code)] // grip čte až tire model (krok 2)
+#[derive(Clone, Copy)]
+struct TireParams {
+    normal_stiffness: f32, // svislá tuhost kontaktu (pneumatika tlačí auto nahoru)
+    normal_damping: f32,   // tlumení svislého kontaktu
+    grip: f32,             // lineární grip (boční/podélná síla na jednotku skluzu)
+}
+
+// Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
+// Solver o typu neví. Zatím jen Rigid; další varianty přidají mezi-nody a jiné beamy.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // další varianty přijdou; držíme šev pro rozšíření
+enum SuspensionKind {
+    Rigid, // hub připojen tuhými beamy přímo k nejbližším nodům těla
+    // McPherson { stiffness, damping, travel },
+    // DoubleWishbone { ... },
+    // LeafSpring { ... },
+}
+
+// FixedUpdate jede defaultně na 64 Hz — délka jednoho snímku solveru.
+const FRAME_DT: f32 = 1.0 / 64.0;
+// Rezerva pod CFL hranicí (stabilita explicitní integrace = dt < 2/ω; bereme jen část).
+const CFL_SAFETY: f32 = 0.4;
+// Strop substepů, ať patologicky tuhý .veh nezmrazí hru.
+const MAX_SUBSTEPS: u32 = 512;
+// Horní hrana zemního kvádru (Collider::cuboid half_height 0.1 v počátku) — kontaktní rovina.
+const GROUND_TOP: f32 = 0.1;
+// Poměr tlumení beamů: 0 = netlumené (zvoní/poskakuje), 1 = kriticky tlumené (mrtvé).
+// Tlumení škálujeme s tuhostí: d = ζ·d_crit = 2·ζ·√(k·μ) — jinak tuhé beamy jen zvoní.
+const DAMPING_RATIO: f32 = 0.25;
+
+// Pomocné metody pro STAVBU soft-body. Jediný zdroj pravdy — používá je builder .veh
+// i builder auta, ať se logika (tlumení, substepy) nikde nerozjede.
+impl SoftBody {
+    // Přidá node a vrátí jeho index. `entity` = render kulička pro zápis Transformu.
+    fn add_node(&mut self, pos: Vec3, mass: f32, entity: Entity) -> usize {
+        let i = self.pos.len();
+        self.pos.push(pos);
+        self.vel.push(Vec3::ZERO);
+        self.inv_mass.push(1.0 / mass);
+        self.force.push(Vec3::ZERO);
+        self.entities.push(entity);
+        i
+    }
+
+    // Přidá beam mezi dva nody. Klidová délka = aktuální vzdálenost, tlumení dle ζ a tuhosti.
+    fn add_beam(&mut self, i: usize, j: usize, k: f32) {
+        let mu = 1.0 / (self.inv_mass[i] + self.inv_mass[j]); // redukovaná hmotnost pružiny
+        self.beams.push(BeamC {
+            i,
+            j,
+            rest: (self.pos[i] - self.pos[j]).length(),
+            k,
+            d: 2.0 * DAMPING_RATIO * (k * mu).sqrt(),
+        });
+    }
+
+    // Dopočítá počet substepů z CFL (Gershgorin: ω²ₘₐₓ ≤ 2·max_i(Σk_i/m_i)). Volá se po
+    // přidání všech beamů. Tuhý uzel (součet tuhostí incidentních beamů) určuje frekvenci.
+    fn compute_substeps(&mut self) {
+        let mut k_sum = vec![0.0_f32; self.pos.len()];
+        for beam in &self.beams {
+            k_sum[beam.i] += beam.k;
+            k_sum[beam.j] += beam.k;
+        }
+        let mut max_w2 = 0.0_f32;
+        for i in 0..self.pos.len() {
+            if self.inv_mass[i] > 0.0 {
+                max_w2 = max_w2.max(2.0 * k_sum[i] * self.inv_mass[i]);
+            }
+        }
+        let max_omega = max_w2.sqrt();
+        self.substeps = if max_omega > 0.0 {
+            let sub_dt_max = CFL_SAFETY * 2.0 / max_omega;
+            ((FRAME_DT / sub_dt_max).ceil() as u32).clamp(1, MAX_SUBSTEPS)
+        } else {
+            1
+        };
+    }
 }
 
 // Seznam dostupných .veh souborů ve složce assets (seřazený) — UI i klávesy berou stejný.
@@ -217,24 +347,26 @@ fn spawn_buttons(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut softbody: ResMut<SoftBody>,
 ) {
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
         }
         match action {
-            SpawnAction::RigidCar => spawn_rigid_car(&mut commands, &mut meshes, &mut materials),
-            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, path),
-            SpawnAction::Clear => clear_spawned(&mut commands, &spawned),
+            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody),
+            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, path),
+            SpawnAction::Clear => clear_spawned(&mut commands, &spawned, &mut softbody),
         }
     }
 }
 
-// Smaže všechny naspawnované entity (i s dětmi: mesh kol, joint pružin).
-fn clear_spawned(commands: &mut Commands, spawned: &Query<Entity, With<Spawned>>) {
+// Smaže všechny naspawnované entity (i s dětmi: mesh kol, joint pružin) a vyčistí solver.
+fn clear_spawned(commands: &mut Commands, spawned: &Query<Entity, With<Spawned>>, softbody: &mut SoftBody) {
     for entity in spawned {
         commands.entity(entity).despawn_recursive();
     }
+    *softbody = SoftBody::default(); // ať po smazání nezůstanou viset nody bez entit
 }
 
 // Klávesové zkratky: 1 = rigid auto, 2 = test.veh, 3 = fabia.veh (pokud existuje).
@@ -244,74 +376,141 @@ fn spawn_shortcuts(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut softbody: ResMut<SoftBody>,
 ) {
     // Clear = Shift+C (samotné C je obsazené kamerou).
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     if shift && keys.just_pressed(KeyCode::KeyC) {
-        clear_spawned(&mut commands, &spawned);
+        clear_spawned(&mut commands, &spawned, &mut softbody);
     }
     if keys.just_pressed(KeyCode::Digit1) {
-        spawn_rigid_car(&mut commands, &mut meshes, &mut materials);
+        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody);
     }
     // Klávesy 2,3,4… = .veh soubory ve stejném pořadí jako UI tlačítka.
     let digits = [KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
     if digits.iter().any(|d| keys.just_pressed(*d)) {
         for (i, path) in available_vehs().iter().enumerate() {
             if i < digits.len() && keys.just_pressed(digits[i]) {
-                spawn_softbody(&mut commands, &mut meshes, &mut materials, &path.to_string_lossy());
+                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &path.to_string_lossy());
             }
         }
     }
 }
 
-// Spawne RIGID jezdící auto: kvádr (chassis) + 4 kola s joints (z dřívějška).
-fn spawn_rigid_car(
+// Postaví zavěšení = beamy mezi hubem kola a tělem. JAK je propojí, závisí na typu.
+// Solver o typu neví — tady se „vlévá" celá variabilita podvozku (custom suspension).
+fn build_suspension(sb: &mut SoftBody, hub: usize, body: &[usize], kind: SuspensionKind) {
+    match kind {
+        // Rigid = hub tuze připojen ke všem nodům těla → kolo drží napevno (zatím žádný zdvih).
+        // McPherson/DoubleWishbone časem přidají mezi-nody a měkčí beamy podél zdvihu.
+        SuspensionKind::Rigid => {
+            let k = 150_000.0;
+            for &b in body {
+                sb.add_beam(hub, b, k);
+            }
+        }
+    }
+}
+
+// Spawne JEZDÍCÍ auto na vlastním solveru (jednotný model): tělo = node-beam kvádr,
+// kola = hub-nody zavěšené beamy + render disky. Minimální test rig pro odladění
+// drive/steer/grip (krok 2). Žádný rapier.
+fn spawn_solver_car(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    sb: &mut SoftBody,
 ) {
-    let car_pos = Vec3::new(0.0, 3.0, 0.0);
+    *sb = SoftBody::default(); // nový spawn = čistý solver
+    let origin = Vec3::new(0.0, 2.0, 0.0);
 
-    let chassis = commands
-        .spawn((
-            Mesh3d(meshes.add(Cuboid::new(1.5, 0.5, 4.0))),
-            MeshMaterial3d(materials.add(Color::srgb(0.8, 0.2, 0.2))),
-            Transform::from_translation(car_pos),
-        ))
-        .insert(physics::car_physics())
-        .insert(Chassis)
-        .insert(Velocity::default())
-        .insert(Spawned) // ať to umí Clear smazat
-        .id();
+    let node_mesh = meshes.add(Sphere::new(0.06));
+    let node_material = materials.add(Color::srgb(0.9, 0.3, 0.2));
 
-    let wheel_radius = 0.32;
-    let wheel_width = 0.2;
-    let wheels = [
-        ("FL", Vec3::new(-1.15, -0.3, 1.5), true, false),
-        ("FR", Vec3::new(1.15, -0.3, 1.5), true, false),
-        ("RL", Vec3::new(-1.15, -0.3, -1.5), false, true),
-        ("RR", Vec3::new(1.15, -0.3, -1.5), false, true),
-    ];
-    for (name, offset, steered, driven) in wheels {
-        commands
-            .spawn((
-                Transform::from_translation(car_pos + offset),
-                Visibility::default(),
-                Name::new(format!("Wheel {name}")),
-            ))
-            .insert(physics::wheel_physics(wheel_radius, wheel_width))
-            .insert(Wheel { radius: wheel_radius, driven, steered })
-            .insert(physics::Suspension::Rigid)
-            .insert(Spawned)
-            .insert(physics::wheel_joint(physics::Suspension::Rigid, chassis, offset, steered))
-            .with_children(|builder| {
-                builder.spawn((
-                    Mesh3d(meshes.add(Cylinder::new(wheel_radius, wheel_width))),
-                    MeshMaterial3d(materials.add(Color::srgb(0.1, 0.1, 0.1))),
-                    Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
-                ));
-            });
+    // --- Tělo: 8 rohů kvádru, PLNĚ provázané tuhými beamy (rám se nedá zkroutit) ---
+    let (hx, hy, hz) = (0.7, 0.25, 1.8);
+    let body_mass = 15.0; // na jeden roh
+    let chassis_k = 300_000.0;
+    let mut body: Vec<usize> = Vec::with_capacity(8);
+    for sx in [-1.0_f32, 1.0] {
+        for sy in [-1.0_f32, 1.0] {
+            for sz in [-1.0_f32, 1.0] {
+                let p = origin + Vec3::new(sx * hx, sy * hy, sz * hz);
+                let e = commands
+                    .spawn((
+                        Mesh3d(node_mesh.clone()),
+                        MeshMaterial3d(node_material.clone()),
+                        Transform::from_translation(p),
+                        Spawned,
+                    ))
+                    .id();
+                body.push(sb.add_node(p, body_mass, e));
+            }
+        }
     }
+    // plný graf přes 8 rohů = 28 beamů → tuhý rám
+    for a in 0..body.len() {
+        for b in (a + 1)..body.len() {
+            sb.add_beam(body[a], body[b], chassis_k);
+        }
+    }
+
+    // --- 4 kola: hub-node (zavěšený na tělo) + render disk ---
+    let wheel_radius = 0.34;
+    let wheel_width = 0.22;
+    let hub_mass = 20.0;
+    let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
+    let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
+    let (wx, wy, wz) = (0.85, -0.15, 1.4);
+    let layout = [
+        (-1.0_f32, 1.0_f32, true, false),  // FL: řízené
+        (1.0, 1.0, true, false),           // FR: řízené
+        (-1.0, -1.0, false, true),         // RL: hnané
+        (1.0, -1.0, false, true),          // RR: hnané
+    ];
+    for (sx, sz, steered, driven) in layout {
+        let hub_pos = origin + Vec3::new(sx * wx, wy, sz * wz);
+        // debug kulička v ose hubu (drží Transform hubu); samotné kolo = disk níž
+        let hub_dbg = commands
+            .spawn((
+                Mesh3d(node_mesh.clone()),
+                MeshMaterial3d(node_material.clone()),
+                Transform::from_translation(hub_pos),
+                Spawned,
+            ))
+            .id();
+        let hub = sb.add_node(hub_pos, hub_mass, hub_dbg);
+        build_suspension(sb, hub, &body, SuspensionKind::Rigid);
+
+        let render = commands
+            .spawn((
+                Mesh3d(wheel_mesh.clone()),
+                MeshMaterial3d(wheel_material.clone()),
+                Transform::from_translation(hub_pos),
+                Spawned,
+            ))
+            .id();
+        sb.wheels.push(WheelC {
+            hub,
+            render,
+            radius: wheel_radius,
+            spin: 0.0,
+            spin_vel: 0.0,
+            steer: 0.0,
+            driven,
+            steered,
+            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, grip: 8_000.0 },
+        });
+    }
+
+    sb.compute_substeps();
+    info!(
+        "Solver auto: {} nodů, {} beamů, {} kol, {} substepů",
+        sb.pos.len(),
+        sb.beams.len(),
+        sb.wheels.len(),
+        sb.substeps
+    );
 }
 
 // BeamNG používá z = nahoru, Bevy y = nahoru. Přehodíme osy, ať auto stojí správně
@@ -320,12 +519,14 @@ fn veh_pos(p: [f32; 3]) -> Vec3 {
     Vec3::new(p[0], p[2], -p[1])
 }
 
-// Načte .veh a postaví soft-body: nody = malé koule (tělesa), beamy = pružiny (SpringJoint).
-// Víc beamů na jeden nod → joint dáme na DÍTĚ nodu (bevy_rapier druhý konec najde přes rodiče).
+// Načte .veh a naplní vlastní solver: nody = render kuličky + záznam v `SoftBody`,
+// beamy = pružiny (`BeamC`) mezi indexy nodů, triangly = deformující povrch.
+// Reálné tuhosti z .veh; tlumení a počet substepů dopočítají helpery `SoftBody`.
 fn spawn_softbody(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    sb: &mut SoftBody,
     path: &str,
 ) {
     let raw = std::fs::read_to_string(path).expect("nelze číst .veh");
@@ -334,51 +535,41 @@ fn spawn_softbody(
 
     let origin = Vec3::new(0.0, 4.0, 6.0); // PŘED auto (+Z) a ve vzduchu, ať to chase kamera vidí
 
+    // Nový spawn = čistý solver (jinak by se sčítala dvě auta do jednoho stavu).
+    *sb = SoftBody::default();
+
     // Sdílený mesh + materiál pro všechny nody (1067× nepřidávat nový asset = výkon).
     let node_mesh = meshes.add(Sphere::new(0.04));
     let node_material = materials.add(Color::srgb(0.2, 0.6, 1.0));
 
-    // Mapy pro propojení beamů: id → Entity a id → pozice (na klidovou délku pružiny).
-    let mut node_entity: std::collections::HashMap<&str, Entity> = std::collections::HashMap::new();
-    let positions: std::collections::HashMap<&str, Vec3> =
-        vehicle.nodes.iter().map(|n| (n.id.as_str(), veh_pos(n.pos))).collect();
+    // Mapa id → (render Entity, index do polí SoftBody). Beamy i triangly z ní berou.
+    let mut node_idx: std::collections::HashMap<&str, (Entity, usize)> = std::collections::HashMap::new();
 
-    // Nody → malé koule jako dynamická tělesa.
+    // Nody → render kuličky (BEZ rapieru) + záznam do solveru přes helper.
     for node in &vehicle.nodes {
         let entity = commands
             .spawn((
                 Mesh3d(node_mesh.clone()),
                 MeshMaterial3d(node_material.clone()),
                 Transform::from_translation(origin + veh_pos(node.pos)),
-                RigidBody::Dynamic,
-                Collider::ball(0.04),
-                AdditionalMassProperties::Mass(node.mass), // hmotnost nodu z .veh
-                Spawned,                                   // ať to umí Clear smazat
+                Spawned, // ať to umí Clear smazat
             ))
             .id();
-        node_entity.insert(node.id.as_str(), entity);
+        let i = sb.add_node(origin + veh_pos(node.pos), node.mass, entity);
+        node_idx.insert(node.id.as_str(), (entity, i));
     }
 
-    // Beamy → pružiny mezi nody. Klidová délka = počáteční vzdálenost.
-    // Reálné BeamNG tuhosti (tisíce až miliony) počítají s 2000 Hz solverem; rapier běží
-    // na 60 Hz, takže je musíme ŠKÁLOVAT DOLŮ a STROPOVAT, jinak to ustřelí. Plus tlumení.
-    // (Plná věrnost = vlastní solver — to je teprve cíl Fáze 2.)
-    let stiffness_scale = 0.01;
-    let max_stiffness = 500.0;
+    // Beamy → BeamC do solveru. REÁLNÁ tuhost z .veh — žádný scale, žádný strop.
     for beam in &vehicle.beams {
-        let (Some(&a), Some(&b)) = (node_entity.get(beam.a.as_str()), node_entity.get(beam.b.as_str())) else {
+        let (Some(&(_, i)), Some(&(_, j))) = (node_idx.get(beam.a.as_str()), node_idx.get(beam.b.as_str())) else {
             continue; // beam odkazuje na neexistující nod → přeskoč
         };
-        let rest = (positions[beam.a.as_str()] - positions[beam.b.as_str()]).length();
-        // Materiál z .veh; když chybí (0), dosadíme fallback. Pak škála + strop.
-        let raw = if beam.stiffness > 0.0 { beam.stiffness } else { 1000.0 };
-        let stiffness = (raw * stiffness_scale).min(max_stiffness);
-        let damping = (if beam.damping > 0.0 { beam.damping } else { 50.0 }).clamp(10.0, 100.0);
-        let spring = SpringJointBuilder::new(rest, stiffness, damping);
-        commands.entity(a).with_children(|child| {
-            child.spawn(ImpulseJoint::new(b, spring));
-        });
+        let k = if beam.stiffness > 0.0 { beam.stiffness } else { 1000.0 };
+        sb.add_beam(i, j, k);
     }
+
+    sb.compute_substeps();
+    info!("Soft-body: {} substepů (~{} Hz solver)", sb.substeps, sb.substeps * 64);
 
     // --- Povrch z trojúhelníků: deformující se mesh, jehož vrcholy sledují nody ---
     // Vrchol i = node v pořadí vehicle.nodes; mapa id → index vrcholu.
@@ -389,7 +580,7 @@ fn spawn_softbody(
         vert_of.insert(node.id.as_str(), i as u32);
         let p = origin + veh_pos(node.pos);
         vertex_positions.push([p.x, p.y, p.z]);
-        vertex_nodes.push(node_entity[node.id.as_str()]);
+        vertex_nodes.push(node_idx[node.id.as_str()].0);
     }
     // Indexy z trojúhelníků (přeskoč ty, co odkazují na neznámý nod).
     let mut indices: Vec<u32> = Vec::new();
@@ -438,6 +629,96 @@ fn update_softbody_mesh(
             .collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.compute_normals();
+    }
+}
+
+// --- SOLVER: semi-implicitní Euler se substeppingem (běží ve FixedUpdate, 64 Hz) ---
+// Jeden snímek rozdělíme na `sb.substeps` malých kroků (adaptivně, viz compute_substeps),
+// aby tuhé beamy zůstaly stabilní (CFL: dt < 2/ω). Reálné tuhosti, žádné škálování.
+fn softbody_solve(sb: ResMut<SoftBody>, time: Res<Time<Fixed>>) {
+    if sb.beams.is_empty() {
+        return; // nic nespawnuto
+    }
+    let sb = sb.into_inner(); // rozbalíme ResMut → můžeme půjčovat víc polí najednou
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+    let ground_y = GROUND_TOP + 0.04; // horní hrana zemního kvádru + poloměr nodu
+    let sub_dt = time.delta_secs() / sb.substeps as f32;
+
+    for _ in 0..sb.substeps {
+        // 1) vynuluj síly a přidej gravitaci (jen pohyblivým nodům)
+        for i in 0..sb.pos.len() {
+            sb.force[i] = if sb.inv_mass[i] > 0.0 { gravity / sb.inv_mass[i] } else { Vec3::ZERO };
+        }
+
+        // 2) síly beamů: pružina (Hooke) + tlumení podél osy
+        for beam in &sb.beams {
+            let delta = sb.pos[beam.j] - sb.pos[beam.i];
+            let len = delta.length();
+            if len < 1e-6 {
+                continue; // zdegenerovaný beam → nedělitelný směr
+            }
+            let dir = delta / len;
+            let spring = beam.k * (len - beam.rest);
+            let rel_v = (sb.vel[beam.j] - sb.vel[beam.i]).dot(dir);
+            let f = (spring + beam.d * rel_v) * dir;
+            sb.force[beam.i] += f; // přitahuje i k j
+            sb.force[beam.j] -= f;
+        }
+
+        // 2.5) svislá síla pneumatik: kontakt jako KRUH o poloměru kola (ne bod jako u nodů).
+        // Tím auto sedí na kolech místo zaboření hubu. Podélná/boční síla přijde v kroku 2.
+        // Indexový loop + kopie skalárů — abychom mohli zapsat do sb.force[hub] bez aliasingu.
+        for wi in 0..sb.wheels.len() {
+            let hub = sb.wheels[wi].hub;
+            let radius = sb.wheels[wi].radius;
+            let ns = sb.wheels[wi].tire.normal_stiffness;
+            let nd = sb.wheels[wi].tire.normal_damping;
+            let pen = (GROUND_TOP + radius) - sb.pos[hub].y; // >0 = pneumatika stlačená
+            if pen > 0.0 {
+                let fy = ns * pen - nd * sb.vel[hub].y; // pružina nahoru − tlumení
+                if fy > 0.0 {
+                    sb.force[hub].y += fy;
+                }
+            }
+        }
+
+        // 3) integrace (semi-implicitní Euler) + kolize se zemí
+        for i in 0..sb.pos.len() {
+            if sb.inv_mass[i] == 0.0 {
+                continue; // ukotvený nod
+            }
+            sb.vel[i] += sb.force[i] * sb.inv_mass[i] * sub_dt;
+            sb.pos[i] += sb.vel[i] * sub_dt;
+
+            // Zem: vytlač nad rovinu a utlum odraz (normála) i tření (tangenta).
+            if sb.pos[i].y < ground_y {
+                sb.pos[i].y = ground_y;
+                if sb.vel[i].y < 0.0 {
+                    sb.vel[i].y = 0.0; // žádný skok zpět (nepružná zem)
+                }
+                sb.vel[i].x *= 0.9; // hrubé tření, než přijde pořádný model
+                sb.vel[i].z *= 0.9;
+            }
+        }
+    }
+}
+
+// Zápis stavu solveru → Transformy render entit (kuličky + disky kol). Mesh už pak
+// deformuje update_softbody_mesh, který čte tyhle Transformy. Běží v Update (po solveru).
+fn softbody_to_transforms(sb: Res<SoftBody>, mut transforms: Query<&mut Transform>) {
+    // Nody → kuličky.
+    for (i, &entity) in sb.entities.iter().enumerate() {
+        if let Ok(mut tf) = transforms.get_mut(entity) {
+            tf.translation = sb.pos[i];
+        }
+    }
+    // Kola → disky: pozice = hub, rotace = řízení(Y) · valení(X) · base(válec Y→osa X).
+    let base = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    for wheel in &sb.wheels {
+        if let Ok(mut tf) = transforms.get_mut(wheel.render) {
+            tf.translation = sb.pos[wheel.hub];
+            tf.rotation = Quat::from_rotation_y(wheel.steer) * Quat::from_rotation_x(wheel.spin) * base;
+        }
     }
 }
 
