@@ -57,6 +57,17 @@ fn main() {
         wheels.extend(jbeam::extract_wheels(&value));
     }
 
+    // BeamNG party stejný nod často REDEFINUJÍ (override). Sloučíme nody podle id —
+    // poslední definice vyhrává, jako v BeamNG. Jinak by vznikaly duplicitní VOLNÉ body
+    // (beamy se připojí jen k jedné kopii, zbytek se rozkutálí).
+    let before = nodes.len();
+    let mut by_id: std::collections::HashMap<String, veh::Node> = std::collections::HashMap::new();
+    for node in nodes {
+        by_id.insert(node.id.clone(), node);
+    }
+    let nodes: Vec<veh::Node> = by_id.into_values().collect();
+    eprintln!("nody: {before} → {} po deduplikaci (sloučení override)", nodes.len());
+
     // Jméno auta: --name, jinak název vstupu (souboru/složky) bez přípony.
     let name = args.name.unwrap_or_else(|| {
         args.input

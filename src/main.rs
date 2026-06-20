@@ -125,6 +125,12 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
     spawn_softbody(&mut commands, &mut meshes, &mut materials);
 }
 
+// BeamNG používá z = nahoru, Bevy y = nahoru. Přehodíme osy, ať auto stojí správně
+// (a zachováme pravotočivost: dopředné +y BeamNG → -z Bevy).
+fn veh_pos(p: [f32; 3]) -> Vec3 {
+    Vec3::new(p[0], p[2], -p[1])
+}
+
 // Načte .veh a postaví soft-body: nody = malé koule (tělesa), beamy = pružiny (SpringJoint).
 // Víc beamů na jeden nod → joint dáme na DÍTĚ nodu (bevy_rapier druhý konec najde přes rodiče).
 fn spawn_softbody(
@@ -132,43 +138,57 @@ fn spawn_softbody(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let raw = std::fs::read_to_string("assets/test.veh").expect("nelze číst assets/test.veh");
+    // Když je k dispozici převedená Fabia (lokální, gitignored), načti ji; jinak testovací čtyřstěn.
+    let path = if std::path::Path::new("assets/fabia.veh").exists() {
+        "assets/fabia.veh"
+    } else {
+        "assets/test.veh"
+    };
+    let raw = std::fs::read_to_string(path).expect("nelze číst .veh");
     let vehicle: veh::Vehicle = serde_json::from_str(&raw).expect("nevalidní .veh");
     info!("Načteno vozidlo z .veh: {} nodů, {} beamů", vehicle.nodes.len(), vehicle.beams.len());
 
     let origin = Vec3::new(0.0, 4.0, 6.0); // PŘED auto (+Z) a ve vzduchu, ať to chase kamera vidí
 
+    // Sdílený mesh + materiál pro všechny nody (1067× nepřidávat nový asset = výkon).
+    let node_mesh = meshes.add(Sphere::new(0.04));
+    let node_material = materials.add(Color::srgb(0.2, 0.6, 1.0));
+
     // Mapy pro propojení beamů: id → Entity a id → pozice (na klidovou délku pružiny).
     let mut node_entity: std::collections::HashMap<&str, Entity> = std::collections::HashMap::new();
     let positions: std::collections::HashMap<&str, Vec3> =
-        vehicle.nodes.iter().map(|n| (n.id.as_str(), Vec3::from(n.pos))).collect();
+        vehicle.nodes.iter().map(|n| (n.id.as_str(), veh_pos(n.pos))).collect();
 
     // Nody → malé koule jako dynamická tělesa.
     for node in &vehicle.nodes {
         let entity = commands
             .spawn((
-                Mesh3d(meshes.add(Sphere::new(0.08))),
-                MeshMaterial3d(materials.add(Color::srgb(0.2, 0.6, 1.0))),
-                Transform::from_translation(origin + Vec3::from(node.pos)),
+                Mesh3d(node_mesh.clone()),
+                MeshMaterial3d(node_material.clone()),
+                Transform::from_translation(origin + veh_pos(node.pos)),
                 RigidBody::Dynamic,
-                Collider::ball(0.08),
+                Collider::ball(0.04),
                 AdditionalMassProperties::Mass(node.mass), // hmotnost nodu z .veh
             ))
             .id();
         node_entity.insert(node.id.as_str(), entity);
     }
 
-    // Beamy → pružiny mezi nody. Klidová délka = počáteční vzdálenost,
-    // tuhost/tlumení PER BEAM z .veh (materiál). Škála kdyby bylo potřeba doladit globálně.
-    let stiffness_scale = 1.0;
+    // Beamy → pružiny mezi nody. Klidová délka = počáteční vzdálenost.
+    // Reálné BeamNG tuhosti (tisíce až miliony) počítají s 2000 Hz solverem; rapier běží
+    // na 60 Hz, takže je musíme ŠKÁLOVAT DOLŮ a STROPOVAT, jinak to ustřelí. Plus tlumení.
+    // (Plná věrnost = vlastní solver — to je teprve cíl Fáze 2.)
+    let stiffness_scale = 0.01;
+    let max_stiffness = 500.0;
     for beam in &vehicle.beams {
         let (Some(&a), Some(&b)) = (node_entity.get(beam.a.as_str()), node_entity.get(beam.b.as_str())) else {
             continue; // beam odkazuje na neexistující nod → přeskoč
         };
         let rest = (positions[beam.a.as_str()] - positions[beam.b.as_str()]).length();
-        // Materiál z .veh; když chybí (0), dosadíme rozumný fallback.
-        let stiffness = if beam.stiffness > 0.0 { beam.stiffness } else { 1000.0 } * stiffness_scale;
-        let damping = if beam.damping > 0.0 { beam.damping } else { 50.0 };
+        // Materiál z .veh; když chybí (0), dosadíme fallback. Pak škála + strop.
+        let raw = if beam.stiffness > 0.0 { beam.stiffness } else { 1000.0 };
+        let stiffness = (raw * stiffness_scale).min(max_stiffness);
+        let damping = (if beam.damping > 0.0 { beam.damping } else { 50.0 }).clamp(10.0, 100.0);
         let spring = SpringJointBuilder::new(rest, stiffness, damping);
         commands.entity(a).with_children(|child| {
             child.spawn(ImpulseJoint::new(b, spring));
