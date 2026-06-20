@@ -38,8 +38,11 @@ pub struct Node {
 }
 
 /// Jeden spoj (beam) mezi dvěma nody — odkazuje na ně přes jejich id.
+/// stiffness/damping = "materiál" beamu (z jbeam beamSpring/beamDamp).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Beam {
-    pub a: String, // id prvního nodu
-    pub b: String, // id druhého nodu
+    pub a: String,      // id prvního nodu
+    pub b: String,      // id druhého nodu
+    pub stiffness: f32, // tuhost pružiny (beamSpring)
+    pub damping: f32,   // tlumení (beamDamp)
 }

@@ -158,14 +158,17 @@ fn spawn_softbody(
         node_entity.insert(node.id.as_str(), entity);
     }
 
-    // Beamy → pružiny mezi nody. Klidová délka = jejich počáteční vzdálenost.
-    let stiffness = 5000.0;
-    let damping = 50.0;
+    // Beamy → pružiny mezi nody. Klidová délka = počáteční vzdálenost,
+    // tuhost/tlumení PER BEAM z .veh (materiál). Škála kdyby bylo potřeba doladit globálně.
+    let stiffness_scale = 1.0;
     for beam in &vehicle.beams {
         let (Some(&a), Some(&b)) = (node_entity.get(beam.a.as_str()), node_entity.get(beam.b.as_str())) else {
             continue; // beam odkazuje na neexistující nod → přeskoč
         };
         let rest = (positions[beam.a.as_str()] - positions[beam.b.as_str()]).length();
+        // Materiál z .veh; když chybí (0), dosadíme rozumný fallback.
+        let stiffness = if beam.stiffness > 0.0 { beam.stiffness } else { 1000.0 } * stiffness_scale;
+        let damping = if beam.damping > 0.0 { beam.damping } else { 50.0 };
         let spring = SpringJointBuilder::new(rest, stiffness, damping);
         commands.entity(a).with_children(|child| {
             child.spawn(ImpulseJoint::new(b, spring));

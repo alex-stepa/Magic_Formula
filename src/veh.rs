@@ -28,6 +28,10 @@ pub struct Node {
 pub struct Beam {
     pub a: String,
     pub b: String,
+    #[serde(default)] // starší .veh bez materiálů → 0 (loader pak dosadí fallback)
+    pub stiffness: f32,
+    #[serde(default)]
+    pub damping: f32,
 }
 
 #[derive(Debug, Deserialize)]

@@ -66,9 +66,22 @@ pub fn extract_beams(root: &Value) -> Vec<Beam> {
         let Some(rows) = part.get("beams").and_then(|n| n.as_array()) else {
             continue;
         };
+        // Aktuální "materiál" beamu — modifikátory ho mění pro NÁSLEDUJÍCÍ beamy.
+        let mut stiffness = 0.0_f64;
+        let mut damping = 0.0_f64;
         for row in rows.iter().skip(1) {
+            // Modifikátor {…}: pokud nastavuje beamSpring/beamDamp, zapamatuj si je.
+            if let Some(obj) = row.as_object() {
+                if let Some(s) = obj.get("beamSpring").and_then(|v| v.as_f64()) {
+                    stiffness = s;
+                }
+                if let Some(d) = obj.get("beamDamp").and_then(|v| v.as_f64()) {
+                    damping = d;
+                }
+                continue;
+            }
             let Some(arr) = row.as_array() else {
-                continue; // {modifikátory} (beamSpring, …) přeskoč
+                continue;
             };
             let (Some(a), Some(b)) = (
                 arr.first().and_then(|v| v.as_str()),
@@ -79,6 +92,8 @@ pub fn extract_beams(root: &Value) -> Vec<Beam> {
             beams.push(Beam {
                 a: a.to_string(),
                 b: b.to_string(),
+                stiffness: stiffness as f32,
+                damping: damping as f32,
             });
         }
     }
