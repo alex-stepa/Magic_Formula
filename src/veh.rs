@@ -1,0 +1,39 @@
+// veh.rs — načtení vlastního .veh formátu do hry.
+// Tady jen Deserialize (umí se NAČÍST z JSON). Zápis dělá konvertor jbeam-rs.
+// Structy se musí shodovat s těmi v jbeam-rs/src/veh.rs (sdílená "smlouva" o formátu).
+
+// allow(dead_code): některá pole (name, version, wheels) zatím nečteme.
+#![allow(dead_code)]
+
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct Vehicle {
+    pub name: String,
+    pub version: u32,
+    pub nodes: Vec<Node>,
+    pub beams: Vec<Beam>,
+    #[serde(default)] // kdyby .veh sekci wheels neměl, bude prázdná
+    pub wheels: Vec<Wheel>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Node {
+    pub id: String,
+    pub pos: [f32; 3],
+    pub mass: f32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Beam {
+    pub a: String,
+    pub b: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Wheel {
+    pub name: String,
+    pub node1: String,
+    pub node2: String,
+    pub dir: i32,
+}

@@ -5,6 +5,7 @@ use bevy::prelude::*;          // základ Bevy: App, Commands, Transform, Compon
 use bevy_rapier3d::prelude::*; // fyzika: RapierPhysicsPlugin, RigidBody, Collider...
 
 mod physics; // načte modul z src/physics.rs (fyzikální komponenty)
+mod veh; // načítání .veh formátu (Fáze 2 — node-beam soft-body)
 
 // Marker komponenta (bez dat) — jen označí, která entita je tělo auta.
 // Podle ní si v systému řízení najdeme auto a otáčíme s ním.
@@ -118,6 +119,57 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
                     Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
                 ));
             });
+    }
+
+    // --- Fáze 2: načti .veh a postav z něj node-beam SOFT-BODY (testovací čtyřstěn) ---
+    spawn_softbody(&mut commands, &mut meshes, &mut materials);
+}
+
+// Načte .veh a postaví soft-body: nody = malé koule (tělesa), beamy = pružiny (SpringJoint).
+// Víc beamů na jeden nod → joint dáme na DÍTĚ nodu (bevy_rapier druhý konec najde přes rodiče).
+fn spawn_softbody(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let raw = std::fs::read_to_string("assets/test.veh").expect("nelze číst assets/test.veh");
+    let vehicle: veh::Vehicle = serde_json::from_str(&raw).expect("nevalidní .veh");
+    info!("Načteno vozidlo z .veh: {} nodů, {} beamů", vehicle.nodes.len(), vehicle.beams.len());
+
+    let origin = Vec3::new(0.0, 4.0, 6.0); // PŘED auto (+Z) a ve vzduchu, ať to chase kamera vidí
+
+    // Mapy pro propojení beamů: id → Entity a id → pozice (na klidovou délku pružiny).
+    let mut node_entity: std::collections::HashMap<&str, Entity> = std::collections::HashMap::new();
+    let positions: std::collections::HashMap<&str, Vec3> =
+        vehicle.nodes.iter().map(|n| (n.id.as_str(), Vec3::from(n.pos))).collect();
+
+    // Nody → malé koule jako dynamická tělesa.
+    for node in &vehicle.nodes {
+        let entity = commands
+            .spawn((
+                Mesh3d(meshes.add(Sphere::new(0.08))),
+                MeshMaterial3d(materials.add(Color::srgb(0.2, 0.6, 1.0))),
+                Transform::from_translation(origin + Vec3::from(node.pos)),
+                RigidBody::Dynamic,
+                Collider::ball(0.08),
+                AdditionalMassProperties::Mass(node.mass), // hmotnost nodu z .veh
+            ))
+            .id();
+        node_entity.insert(node.id.as_str(), entity);
+    }
+
+    // Beamy → pružiny mezi nody. Klidová délka = jejich počáteční vzdálenost.
+    let stiffness = 5000.0;
+    let damping = 50.0;
+    for beam in &vehicle.beams {
+        let (Some(&a), Some(&b)) = (node_entity.get(beam.a.as_str()), node_entity.get(beam.b.as_str())) else {
+            continue; // beam odkazuje na neexistující nod → přeskoč
+        };
+        let rest = (positions[beam.a.as_str()] - positions[beam.b.as_str()]).length();
+        let spring = SpringJointBuilder::new(rest, stiffness, damping);
+        commands.entity(a).with_children(|child| {
+            child.spawn(ImpulseJoint::new(b, spring));
+        });
     }
 }
 
