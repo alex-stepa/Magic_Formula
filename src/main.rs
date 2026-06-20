@@ -40,7 +40,7 @@ fn main() {
         // Startup = spustí se jednou na začátku (postaví scénu).
         .add_systems(Startup, setup)
         // Update = spustí se každý snímek (reaguje na vstup).
-        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera))
+        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera, spawn_buttons, spawn_shortcuts, toggle_menu))
         .run();
 }
 
@@ -64,12 +64,204 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
     // Zem: plochý plane 50×50 + fyzika (pevná podlaha, do které věci narážejí).
     commands.spawn((Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))), MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))))).insert(physics::ground_physics());
 
-    // Pozici auta si uložíme, ať ji použijeme pro auto i pro výpočet pozic kol.
+    // Auto se na startu NEspawnuje — vybereš ho v UI (tlačítka) nebo klávesou 1/2/3.
+    spawn_ui(&mut commands);
+}
+
+// Co dané tlačítko / klávesa udělá.
+#[derive(Component, Clone)]
+enum SpawnAction {
+    RigidCar,         // jezdící kvádr + 4 kola
+    SoftBody(String), // node-beam soft-body z .veh souboru na téhle cestě
+    Clear,            // smaže všechna naspawnovaná auta
+}
+
+// Marker na všech naspawnovaných herních entitách (chassis, kola, nody) — podle něj Clear maže.
+#[derive(Component)]
+struct Spawned;
+
+// Jediné tlačítko, co otevírá/zavírá menu.
+#[derive(Component)]
+struct MenuToggleButton;
+
+// Panel s volbami (rozbalovací) — přepíná se jeho zobrazení.
+#[derive(Component)]
+struct MenuPanel;
+
+// Seznam dostupných .veh souborů ve složce assets (seřazený) — UI i klávesy berou stejný.
+fn available_vehs() -> Vec<std::path::PathBuf> {
+    let mut vehs = Vec::new();
+    if let Ok(dir) = std::fs::read_dir("assets") {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|x| x == "veh") {
+                vehs.push(path);
+            }
+        }
+    }
+    vehs.sort();
+    vehs
+}
+
+// UI vlevo nahoře: jedno tlačítko „Menu", které rozbalí/sbalí panel s volbami.
+fn spawn_ui(commands: &mut Commands) {
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(10.0),
+            left: Val::Px(10.0),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(6.0),
+            ..default()
+        })
+        .with_children(|root| {
+            // Toggle tlačítko — vždy viditelné.
+            root.spawn((
+                Button,
+                Node {
+                    width: Val::Px(260.0),
+                    height: Val::Px(34.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(Color::srgb(0.2, 0.2, 0.28)),
+                MenuToggleButton,
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Text::new("\u{2630} Menu"),
+                    TextFont { font_size: 16.0, ..default() },
+                    TextColor(Color::WHITE),
+                ));
+            });
+
+            // Panel s volbami — na startu SKRYTÝ (Display::None), toggle ho ukáže.
+            root.spawn((
+                Node {
+                    display: Display::None,
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(6.0),
+                    ..default()
+                },
+                MenuPanel,
+            ))
+            .with_children(|panel| {
+                spawn_button(panel, "1 — Rigid auto (jezdící)", SpawnAction::RigidCar);
+                for (i, path) in available_vehs().iter().enumerate() {
+                    let file = path.file_name().unwrap().to_string_lossy();
+                    let label = format!("{} — Soft-body: {file}", i + 2);
+                    spawn_button(panel, &label, SpawnAction::SoftBody(path.to_string_lossy().into_owned()));
+                }
+                spawn_button(panel, "Shift+C — Clear (smazat auta)", SpawnAction::Clear);
+            });
+        });
+}
+
+// Toggle menu: klik na „Menu" přepne zobrazení panelu.
+fn toggle_menu(
+    toggle: Query<&Interaction, (Changed<Interaction>, With<MenuToggleButton>)>,
+    mut panel: Query<&mut Node, With<MenuPanel>>,
+) {
+    for interaction in &toggle {
+        if *interaction == Interaction::Pressed {
+            for mut node in &mut panel {
+                node.display = if node.display == Display::None {
+                    Display::Flex
+                } else {
+                    Display::None
+                };
+            }
+        }
+    }
+}
+
+// Pomocník: jedno tlačítko s popiskem a akcí.
+fn spawn_button(parent: &mut ChildBuilder, label: &str, action: SpawnAction) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(260.0),
+                height: Val::Px(34.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgb(0.15, 0.15, 0.18)),
+            action,
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(label),
+                TextFont { font_size: 15.0, ..default() },
+                TextColor(Color::WHITE),
+            ));
+        });
+}
+
+// Reakce na kliknutí tlačítka → spawne příslušné auto.
+fn spawn_buttons(
+    interactions: Query<(&Interaction, &SpawnAction), (Changed<Interaction>, With<Button>)>,
+    spawned: Query<Entity, With<Spawned>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (interaction, action) in &interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match action {
+            SpawnAction::RigidCar => spawn_rigid_car(&mut commands, &mut meshes, &mut materials),
+            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, path),
+            SpawnAction::Clear => clear_spawned(&mut commands, &spawned),
+        }
+    }
+}
+
+// Smaže všechny naspawnované entity (i s dětmi: mesh kol, joint pružin).
+fn clear_spawned(commands: &mut Commands, spawned: &Query<Entity, With<Spawned>>) {
+    for entity in spawned {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+// Klávesové zkratky: 1 = rigid auto, 2 = test.veh, 3 = fabia.veh (pokud existuje).
+fn spawn_shortcuts(
+    keys: Res<ButtonInput<KeyCode>>,
+    spawned: Query<Entity, With<Spawned>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // Clear = Shift+C (samotné C je obsazené kamerou).
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if shift && keys.just_pressed(KeyCode::KeyC) {
+        clear_spawned(&mut commands, &spawned);
+    }
+    if keys.just_pressed(KeyCode::Digit1) {
+        spawn_rigid_car(&mut commands, &mut meshes, &mut materials);
+    }
+    // Klávesy 2,3,4… = .veh soubory ve stejném pořadí jako UI tlačítka.
+    let digits = [KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
+    if digits.iter().any(|d| keys.just_pressed(*d)) {
+        for (i, path) in available_vehs().iter().enumerate() {
+            if i < digits.len() && keys.just_pressed(digits[i]) {
+                spawn_softbody(&mut commands, &mut meshes, &mut materials, &path.to_string_lossy());
+            }
+        }
+    }
+}
+
+// Spawne RIGID jezdící auto: kvádr (chassis) + 4 kola s joints (z dřívějška).
+fn spawn_rigid_car(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
     let car_pos = Vec3::new(0.0, 3.0, 0.0);
 
-    // Auto (placeholder): červený kvádr 1.5×0.5×4 + fyzika. Užší než stopa kol,
-    // aby přední (i zadní) kola stála volně vedle těla = prostor místo "výřezu".
-    // .id() vrátí Entity (identitu auta). Uložíme si ji — joints kol ji potřebují.
     let chassis = commands
         .spawn((
             Mesh3d(meshes.add(Cuboid::new(1.5, 0.5, 4.0))),
@@ -77,42 +269,32 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
             Transform::from_translation(car_pos),
         ))
         .insert(physics::car_physics())
-        .insert(Chassis)            // marker, ať auto najdeme v řízení
-        .insert(Velocity::default()) // umožní číst/nastavit rychlost auta
+        .insert(Chassis)
+        .insert(Velocity::default())
+        .insert(Spawned) // ať to umí Clear smazat
         .id();
 
-    // Společné parametry kol — později přijdou z .veh souboru (build system).
     let wheel_radius = 0.32;
     let wheel_width = 0.2;
-
-    // Seznam kol: (název, offset od středu auta, řízené, hnané).
-    // Iterujeme přes něj smyčkou → přidat/změnit kolo = změnit data, ne kód.
-    // X = ±1.15 (kraje, kousek mimo tělo, ať se collidery na startu nepřekrývají),
-    // Z = ±1.5 (přední/zadní náprava), Y = -0.3 (kousek pod střed auta).
     let wheels = [
-        ("FL", Vec3::new(-1.15, -0.3, 1.5), true, false),  // přední levé: řízené
-        ("FR", Vec3::new(1.15, -0.3, 1.5), true, false),   // přední pravé: řízené
-        ("RL", Vec3::new(-1.15, -0.3, -1.5), false, true), // zadní levé: hnané
-        ("RR", Vec3::new(1.15, -0.3, -1.5), false, true),  // zadní pravé: hnané
+        ("FL", Vec3::new(-1.15, -0.3, 1.5), true, false),
+        ("FR", Vec3::new(1.15, -0.3, 1.5), true, false),
+        ("RL", Vec3::new(-1.15, -0.3, -1.5), false, true),
+        ("RR", Vec3::new(1.15, -0.3, -1.5), false, true),
     ];
-
-    // Pro každý záznam v seznamu spawneme jedno kolo.
     for (name, offset, steered, driven) in wheels {
         commands
             .spawn((
-                // Tělo kola: BEZ rotace (kvůli ose jointu). Pozice = auto + offset.
                 Transform::from_translation(car_pos + offset),
-                Visibility::default(), // ať se dědí viditelnost na mesh-dítě
-                Name::new(format!("Wheel {name}")), // jméno pro snazší ladění
+                Visibility::default(),
+                Name::new(format!("Wheel {name}")),
             ))
             .insert(physics::wheel_physics(wheel_radius, wheel_width))
             .insert(Wheel { radius: wheel_radius, driven, steered })
-            .insert(physics::Suspension::Rigid) // typ zavěšení (data pro build system)
-            // Joint: kolo → chassis. U řízených kol půjde rám jointu za běhu natáčet.
+            .insert(physics::Suspension::Rigid)
+            .insert(Spawned)
             .insert(physics::wheel_joint(physics::Suspension::Rigid, chassis, offset, steered))
             .with_children(|builder| {
-                // Mesh válce jako DÍTĚ, otočené o 90° → kolo vizuálně "leží" (osa X).
-                // Otáčíme jen vzhled, ne tělo, takže osa jointu zůstane správná.
                 builder.spawn((
                     Mesh3d(meshes.add(Cylinder::new(wheel_radius, wheel_width))),
                     MeshMaterial3d(materials.add(Color::srgb(0.1, 0.1, 0.1))),
@@ -120,9 +302,6 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
                 ));
             });
     }
-
-    // --- Fáze 2: načti .veh a postav z něj node-beam SOFT-BODY (testovací čtyřstěn) ---
-    spawn_softbody(&mut commands, &mut meshes, &mut materials);
 }
 
 // BeamNG používá z = nahoru, Bevy y = nahoru. Přehodíme osy, ať auto stojí správně
@@ -137,13 +316,8 @@ fn spawn_softbody(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    path: &str,
 ) {
-    // Když je k dispozici převedená Fabia (lokální, gitignored), načti ji; jinak testovací čtyřstěn.
-    let path = if std::path::Path::new("assets/fabia.veh").exists() {
-        "assets/fabia.veh"
-    } else {
-        "assets/test.veh"
-    };
     let raw = std::fs::read_to_string(path).expect("nelze číst .veh");
     let vehicle: veh::Vehicle = serde_json::from_str(&raw).expect("nevalidní .veh");
     info!("Načteno vozidlo z .veh: {} nodů, {} beamů", vehicle.nodes.len(), vehicle.beams.len());
@@ -169,6 +343,7 @@ fn spawn_softbody(
                 RigidBody::Dynamic,
                 Collider::ball(0.04),
                 AdditionalMassProperties::Mass(node.mass), // hmotnost nodu z .veh
+                Spawned,                                   // ať to umí Clear smazat
             ))
             .id();
         node_entity.insert(node.id.as_str(), entity);
