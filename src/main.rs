@@ -6,6 +6,7 @@ use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor}; // op
 use bevy::render::mesh::Indices; // indexy trojúhelníků pro mesh
 use bevy::render::render_asset::RenderAssetUsages; // mesh zůstane i v main světě (ať ho updatujeme)
 use bevy::render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat}; // TriangleList + tvorba textury
+use bevy::render::view::NoFrustumCulling; // deformující mesh: vypnout culling (Aabb se nepřepočítává)
 use bevy_rapier3d::prelude::*; // fyzika: RapierPhysicsPlugin, RigidBody, Collider...
 
 mod physics; // načte modul z src/physics.rs (fyzikální komponenty)
@@ -789,8 +790,135 @@ fn spawn_softbody(
         sb.add_beam(i, j, k);
     }
 
+    // --- A1+A2: KOLA z .veh ---
+    // `.veh` má `wheels: [{name, node1, node2, dir}]`, kde node1/node2 = AXLE nody kola.
+    // POZOR: v BeamNG mají hub-nody jen LOKÁLNÍ souřadnice kola (všechny ~[x,0,0]), takže
+    // jejich střed NENÍ skutečná poloha kola (přední i zadní by splynuly). Reálnou pozici
+    // dostaneme z jejich beam-SOUSEDŮ (= suspension nody fh*/rh*…), co globální pozice mají.
+    // Tytéž sousedy = úchyty zavěšení (build_suspension), takže hub na nich rovnou visí.
+    let wheel_radius = 0.34;
+    let wheel_width = 0.20;
+    let hub_mass = 35.0;
+    let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
+    let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
+    let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
+    let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
+
+    // Sousedství přes beamy (index nodu → indexy spojené beamem). sb.pos teď = jen nody .veh.
+    let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); sb.pos.len()];
+    for beam in &vehicle.beams {
+        if let (Some(&(_, i)), Some(&(_, j))) =
+            (node_idx.get(beam.a.as_str()), node_idx.get(beam.b.as_str()))
+        {
+            neighbors[i].push(j);
+            neighbors[j].push(i);
+        }
+    }
+
+    // 1. průchod: pro každé kolo poskládej úchyty (sousedi axle nodů, bez nich samých)
+    // a z jejich průměru spočti REÁLNOU pozici hubu.
+    let mut wheels: Vec<(Vec<usize>, Vec3)> = Vec::new(); // (úchyty zavěšení, hub_pos)
+    for wheel in &vehicle.wheels {
+        let (Some(&(_, n1)), Some(&(_, n2))) =
+            (node_idx.get(wheel.node1.as_str()), node_idx.get(wheel.node2.as_str()))
+        else {
+            continue; // kolo odkazuje na neexistující nod → přeskoč
+        };
+        let mut anchors: Vec<usize> = Vec::new();
+        for &axle in &[n1, n2] {
+            for &nb in &neighbors[axle] {
+                if nb != n1 && nb != n2 && !anchors.contains(&nb) {
+                    anchors.push(nb);
+                }
+            }
+        }
+        if anchors.is_empty() {
+            continue; // bez úchytů neumíme kolo umístit ani zavěsit
+        }
+        let hub_pos = anchors.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / anchors.len() as f32;
+        wheels.push((anchors, hub_pos));
+    }
+    // Průměrné z hubů → hranice mezi přední (větší z) a zadní (menší z) osou.
+    let mean_z = wheels.iter().map(|(_, p)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
+
+    // 2. průchod: hub-node + render disk + zavěšení (Rigid) + WheelC.
+    let mut hub_idxs: Vec<usize> = Vec::new(); // pro tuhý rám mezi koly (níž)
+    for (anchors, hub_pos) in &wheels {
+        let mut hub_pos = *hub_pos;
+        // .veh dá kola moc inboard (hub = průměr zatažených suspension nodů). Vytlač je ven
+        // na rozumný rozchod, ať nejsou zastrčená pod karoserií. Rest-length beamů zavěšení
+        // (build_suspension níž) tuhle polohu zafixuje, i když anchory zůstanou inboard.
+        hub_pos.x = hub_pos.x.signum() * 0.80;
+        // Posaď kolo NÍŽ pod suspension nody = světlá výška. Dno Fabie je nízko (y≈0, hub≈0.32);
+        // s realistickým kolem by dřelo o zem (tření přilepí auto). Spuštěním hubu se karoserie
+        // zvedne nad zem. Rest-length beamů zavěšení (build_suspension) tuhle polohu zafixuje.
+        hub_pos.y -= 0.14;
+        let front = hub_pos.z > mean_z; // přední osa = +z (přední kola Fabie vyšla na +z)
+        let render = commands
+            .spawn((
+                Mesh3d(wheel_mesh.clone()),
+                MeshMaterial3d(wheel_material.clone()),
+                Transform::from_translation(hub_pos),
+                Spawned,
+            ))
+            .with_children(|w| {
+                w.spawn((
+                    Mesh3d(marker_mesh.clone()),
+                    MeshMaterial3d(marker_material.clone()),
+                    Transform::from_xyz(0.0, 0.0, wheel_radius + 0.03),
+                ));
+            })
+            .id();
+        // Hub = nový node; jeho render entita = disk kola (softbody_to_transforms mu
+        // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
+        let hub = sb.add_node(hub_pos, hub_mass, render);
+        build_suspension(sb, hub, anchors, SuspensionKind::Rigid); // přitáhni hub na suspension nody
+        hub_idxs.push(hub);
+        sb.wheels.push(WheelC {
+            hub,
+            render,
+            radius: wheel_radius,
+            spin: 0.0,
+            spin_vel: 0.0,
+            steer: 0.0,
+            drive_torque: 0.0,
+            brake: 0.0,
+            front,
+            steered: front, // přední = řízená (A4 to případně doladí)
+            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
+        });
+    }
+
+    // Tuhý rám mezi koly (jako plně provázaný rám test auta): drží karoserii, ať se
+    // neprověsí mezi nápravami až na zem, a přenáší hnací sílu jako CELEK (ne jen lokální
+    // deformace u hnaných kol). 4 huby → 6 beamů, tuhé jako rám test auta.
+    for a in 0..hub_idxs.len() {
+        for b in (a + 1)..hub_idxs.len() {
+            sb.add_beam(hub_idxs[a], hub_idxs[b], 300_000.0);
+        }
+    }
+
+    // --- A3: ChassisFrame z nodů Fabie (směr auta pro solver/kameru/render) ---
+    // Klasifikace jako u test auta: front = +z, right = +x (handedness, ať up = fwd×right = +y).
+    // POZOR: pravá kola Fabie jsou fyzicky na −x → „right" rám může vyjít zrcadlově. Když A/D
+    // zatáčí na opačnou stranu, otoč znaménko steeru (nebo zde prohoď left↔right).
+    let body_count = vehicle.nodes.len(); // nody Fabie = indexy 0..body_count (huby jsou až za nimi)
+    let center = (0..body_count).map(|i| sb.pos[i]).sum::<Vec3>() / body_count as f32;
+    let (mut front, mut rear, mut left, mut right) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for i in 0..body_count {
+        if sb.pos[i].z > center.z { front.push(i) } else { rear.push(i) }
+        if sb.pos[i].x > center.x { right.push(i) } else { left.push(i) }
+    }
+    sb.chassis = Some(ChassisFrame { front, rear, left, right });
+
+    // POŘADÍ: kola/zavěšení přidávají beamy (suspension), proto až TEĎ počítáme substepy.
     sb.compute_substeps();
-    info!("Soft-body: {} substepů (~{} Hz solver)", sb.substeps, sb.substeps * 64);
+    info!(
+        "Soft-body: {} kol, {} substepů (~{} Hz solver)",
+        sb.wheels.len(),
+        sb.substeps,
+        sb.substeps * 64
+    );
 
     // --- Povrch z trojúhelníků: deformující se mesh, jehož vrcholy sledují nody ---
     // Vrchol i = node v pořadí vehicle.nodes; mapa id → index vrcholu.
@@ -825,6 +953,7 @@ fn spawn_softbody(
             MeshMaterial3d(materials.add(Color::srgb(0.75, 0.75, 0.8))),
             Transform::IDENTITY,
             SoftbodyMesh { nodes: vertex_nodes },
+            NoFrustumCulling, // mesh se deformuje (vrcholy se mění, Transform pevný) → culling ho jinak občas schová
             Spawned,
         ));
     }
@@ -871,6 +1000,10 @@ fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixe
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let ground_y = GROUND_TOP + 0.04; // horní hrana zemního kvádru + poloměr nodu
     let sub_dt = time.delta_secs() / sb.substeps as f32;
+    // Tangenciální tření země je per-substep násobení rychlosti. To se ALE umocňuje počtem
+    // substepů: 0.9^4 (test auto) je mírné, ale 0.9^382 (Fabia) = ~0 → každý dotyk přilepí.
+    // Přepočítáme faktor tak, aby výsledek za SNÍMEK byl stejný (~0.7) bez ohledu na substepy.
+    let tang_keep = 0.7_f32.powf(1.0 / sb.substeps as f32);
     let (front_lock, rear_lock) = (dt.front_diff.lock, dt.rear_diff.lock); // diff osy
 
     for _ in 0..sb.substeps {
@@ -1008,8 +1141,8 @@ fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixe
                 if sb.vel[i].y < 0.0 {
                     sb.vel[i].y = 0.0; // žádný skok zpět (nepružná zem)
                 }
-                sb.vel[i].x *= 0.9; // hrubé tření, než přijde pořádný model
-                sb.vel[i].z *= 0.9;
+                sb.vel[i].x *= tang_keep; // hrubé tření (substep-nezávislé), než přijde pořádný model
+                sb.vel[i].z *= tang_keep;
             }
         }
     }
