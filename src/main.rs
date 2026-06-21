@@ -2,18 +2,14 @@
 // Tady se sestaví Bevy App, zapnou pluginy a zaregistrují systémy.
 
 use bevy::prelude::*;          // základ Bevy: App, Commands, Transform, Component...
+use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor}; // opakující se textura zem
 use bevy::render::mesh::Indices; // indexy trojúhelníků pro mesh
 use bevy::render::render_asset::RenderAssetUsages; // mesh zůstane i v main světě (ať ho updatujeme)
-use bevy::render::render_resource::PrimitiveTopology; // TriangleList
+use bevy::render::render_resource::{Extent3d, PrimitiveTopology, TextureDimension, TextureFormat}; // TriangleList + tvorba textury
 use bevy_rapier3d::prelude::*; // fyzika: RapierPhysicsPlugin, RigidBody, Collider...
 
 mod physics; // načte modul z src/physics.rs (fyzikální komponenty)
 mod veh; // načítání .veh formátu (Fáze 2 — node-beam soft-body)
-
-// Marker komponenta (bez dat) — jen označí, která entita je tělo auta.
-// Podle ní si v systému řízení najdeme auto a otáčíme s ním.
-#[derive(Component)]
-struct Chassis;
 
 // Komponenta = "štítek s daty" na entitě. Tahle značí, že entita je kolo.
 // Podle ní půjde kola najít a build system bude měnit jejich parametry.
@@ -42,18 +38,25 @@ fn main() {
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         // Startup = spustí se jednou na začátku (postaví scénu).
         .init_resource::<SoftBody>()
+        .init_resource::<Drivetrain>()
         .add_systems(Startup, setup)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
         .add_systems(FixedUpdate, softbody_solve)
         // Update = spustí se každý snímek (reaguje na vstup, zapisuje pozice do meshe).
-        .add_systems(Update, (vehicle_drive, vehicle_steer, follow_camera, spawn_buttons, spawn_shortcuts, toggle_menu, softbody_to_transforms, update_softbody_mesh).chain())
+        // Pořadí: nejdřív řazení + výpočet RPM, pak pohon (čte RPM), pak zbytek.
+        .add_systems(Update, (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, update_hud, camera_control, spawn_buttons, spawn_shortcuts, toggle_menu, softbody_to_transforms, update_softbody_mesh).chain())
         .run();
 }
 
 // Postaví scénu: kamera, světlo, zem a auto. Běží jednou při startu.
 // Commands = fronta příkazů na vytváření/úpravu entit.
 // ResMut<Assets<...>> = zapisovatelný přístup do úložiště meshů a materiálů.
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
     // Kamera ve výšce 8, kus dozadu (z=15), kouká do středu světa (0,0,0).
     commands.spawn(Camera3d::default()).insert(Transform::from_xyz(0.0, 8.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y));
 
@@ -67,11 +70,78 @@ fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, -0.5, 0.0)),
     ));
 
-    // Zem: plochý plane 50×50 + fyzika (pevná podlaha, do které věci narážejí).
-    commands.spawn((Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0))), MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.3))))).insert(physics::ground_physics());
+    // Zem: obří plochý plane s mřížkovou texturou (záchytné body na vnímání rychlosti).
+    // Fyzika je stejně nekonečná — solver kontaktuje rovinu y = GROUND_TOP bez hranic.
+    let ground_size = 5000.0;
+    let cell = 5.0; // velikost jedné buňky mřížky v metrech
+    let ground_mat = materials.add(StandardMaterial {
+        base_color_texture: Some(images.add(grid_texture())),
+        // Dlaždice se opakuje (ground_size/cell)× přes celý plane → mřížka po 5 m.
+        uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(ground_size / cell)),
+        perceptual_roughness: 0.95,
+        ..default()
+    });
+    commands
+        .spawn((Mesh3d(meshes.add(Plane3d::default().mesh().size(ground_size, ground_size))), MeshMaterial3d(ground_mat)))
+        .insert(physics::ground_physics());
 
     // Auto se na startu NEspawnuje — vybereš ho v UI (tlačítka) nebo klávesou 1/2/3.
     spawn_ui(&mut commands);
+    spawn_hud(&mut commands);
+}
+
+// Vyrobí dlaždici mřížky: zelená výplň + světlejší čára na dvou okrajích. Sampler je
+// nastaven na opakování (Repeat), takže se přes celý plane vykreslí souvislá mřížka.
+fn grid_texture() -> Image {
+    let size = 64u32; // rozlišení dlaždice v px
+    let line = 2u32;  // tloušťka čáry v px
+    let fill = [70u8, 100, 70, 255];   // tráva
+    let lines = [120u8, 150, 120, 255]; // čára mřížky
+    let mut data = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            // čára na levém a horním okraji dlaždice → po složení vznikne souvislá mříž
+            let on_line = x < line || y < line;
+            data.extend_from_slice(if on_line { &lines } else { &fill });
+        }
+    }
+    let mut img = Image::new(
+        Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    // Bez Repeat by se textura jen roztáhla; takhle se dlaždí donekonečna.
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        ..default()
+    });
+    img
+}
+
+// HUD vpravo dole: rychlost / kvalt / otáčky. Text přepisuje update_hud každý snímek.
+fn spawn_hud(commands: &mut Commands) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(16.0),
+                right: Val::Px(16.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Text::new("—"),
+                TextFont { font_size: 26.0, ..default() },
+                TextColor(Color::srgb(0.9, 0.95, 1.0)),
+                Node { margin: UiRect::all(Val::Px(10.0)), ..default() },
+                HudText,
+            ));
+        });
 }
 
 // Co dané tlačítko / klávesa udělá.
@@ -85,6 +155,11 @@ enum SpawnAction {
 // Marker na všech naspawnovaných herních entitách (chassis, kola, nody) — podle něj Clear maže.
 #[derive(Component)]
 struct Spawned;
+
+// Viditelný trup auta (kvádr). Nemá vlastní fyziku — jeho Transform každý snímek
+// přepíšeme z orientace rámu (chassis), ať „sedí" na uzlech soft-body.
+#[derive(Component)]
+struct CarBody;
 
 // Jediné tlačítko, co otevírá/zavírá menu.
 #[derive(Component)]
@@ -114,6 +189,17 @@ struct SoftBody {
     wheels: Vec<WheelC>,   // kola (každé = hub-node + stav pneumatiky)
     entities: Vec<Entity>, // node index i ↔ render entita (zápis Transformu)
     substeps: u32,         // kolik integračních kroků na snímek (adaptivně dle nejtužšího beamu)
+    chassis: Option<ChassisFrame>, // referenční nody pro směr auta (None u .veh — nemá kola)
+}
+
+// Referenční nody těla, ze kterých solver dopočítá dopředný/boční směr auta (yaw rámu).
+// Forward = mean(front) − mean(rear), Right = mean(right) − mean(left). Plní ho builder auta;
+// solver je tak pořád data-driven (nezná layout, jen čte indexy).
+struct ChassisFrame {
+    front: Vec<usize>,
+    rear: Vec<usize>,
+    left: Vec<usize>,
+    right: Vec<usize>,
 }
 
 // Beam ve solveru — indexy do polí výše (ne Entity ani String), REÁLNÁ tuhost z .veh.
@@ -129,31 +215,45 @@ struct BeamC {
 // Princip rozšiřitelnosti: všechno tady jsou DATA, ne konstanty v kódu. Tuning part / custom
 // díly časem jen přepíšou tahle čísla; solver se nemění. Pérování NENÍ tady — to jsou beamy,
 // které postaví builder zavěšení (viz SuspensionKind) → různé geometrie bez zásahu do solveru.
-// allow(dead_code): spin_vel/driven/steered/grip zatím jen zapisujeme při spawnu —
-// číst je bude TIRE MODEL (krok 2: pohon, brzda, řízení, boční grip). Schválně už teď,
-// ať je datový tvar kola hotový a builder se příště nemusí měnit.
-#[allow(dead_code)]
 struct WheelC {
     hub: usize,        // index hub-nodu v SoftBody (na něm visí pérovací beamy do těla)
     render: Entity,    // entita disku kola (zápis Transformu: pozice hubu + spin + steer)
     radius: f32,
-    spin: f32,         // úhel natočení kola (rad) — pro render i výpočet kontaktu
-    spin_vel: f32,     // úhlová rychlost valení (rad/s) — pohon/brzda (krok 2)
-    steer: f32,        // aktuální natočení řízení (rad), nastaví vehicle_steer (krok 2)
-    driven: bool,      // pohání ho motor? (krok 2)
-    steered: bool,     // natáčí se s ním? (krok 2)
+    spin: f32,         // úhel natočení kola (rad) — pro render
+    spin_vel: f32,     // úhlová rychlost valení (rad/s)
+    steer: f32,        // aktuální natočení řízení (rad), nastaví vehicle_steer
+    drive_torque: f32, // moment na tomhle kole (Nm), nastaví vehicle_drive (z motoru+převodů)
+    brake: f32,        // brzdný moment (Nm), nastaví vehicle_drive
+    front: bool,       // je na PŘEDNÍ ose? (pohon rozhoduje DriveLayout, ne kolo samo)
+    steered: bool,     // natáčí se s ním?
     tire: TireParams,  // model pneumatiky — izolovaná data, ať jde vyměnit za Pacejku
 }
 
-// Parametry pneumatiky = data. Teď jen svislá tuhost/tlumení (auto sedí na kolech);
-// `grip` použije boční/podélný tire model v kroku 2. Časem sem přijdou Pacejka koeficienty.
-#[allow(dead_code)] // grip čte až tire model (krok 2)
+// Koeficienty Magic Formula (Pacejka) pro jednu osu (podélnou nebo boční).
+// F = D·sin(C·atan(B·x − E·(B·x − atan(B·x)))), kde D = μ·Fz se dopočítá za běhu.
+#[derive(Clone, Copy)]
+struct Pacejka {
+    b: f32, // stiffness factor — jak strmě křivka stoupá ke špičce
+    c: f32, // shape factor — tvar (podélně ~1.65, bočně ~1.3)
+    e: f32, // curvature factor — ostrost špičky (~0.97)
+}
+
+// Parametry pneumatiky = data. Svislý kontakt (auto sedí na kolech) + dvě Pacejka křivky.
 #[derive(Clone, Copy)]
 struct TireParams {
     normal_stiffness: f32, // svislá tuhost kontaktu (pneumatika tlačí auto nahoru)
     normal_damping: f32,   // tlumení svislého kontaktu
-    grip: f32,             // lineární grip (boční/podélná síla na jednotku skluzu)
+    long: Pacejka,         // podélná křivka (slip ratio → tah/brzda)
+    lat: Pacejka,          // boční křivka (slip angle → zatáčení)
 }
+
+// --- LADICÍ HODNOTY PNEUMATIKY (vše na jednom místě) ---
+// Změň čísla a `cargo run` — solver je nesahá, jen čte. D (špička) = MU·Fz dynamicky.
+const TIRE_LONG: Pacejka = Pacejka { b: 10.0, c: 1.65, e: 0.97 };
+const TIRE_LAT: Pacejka = Pacejka { b: 8.0, c: 1.3, e: 0.97 };
+// Spodní mez referenční rychlosti pro normalizaci skluzu (m/s). Brání dělení nulou
+// při rozjezdu z místa — bez ní κ vystřelí a auto exploduje.
+const V_LOW: f32 = 2.0;
 
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
 // Solver o typu neví. Zatím jen Rigid; další varianty přidají mezi-nody a jiné beamy.
@@ -177,6 +277,96 @@ const GROUND_TOP: f32 = 0.1;
 // Poměr tlumení beamů: 0 = netlumené (zvoní/poskakuje), 1 = kriticky tlumené (mrtvé).
 // Tlumení škálujeme s tuhostí: d = ζ·d_crit = 2·ζ·√(k·μ) — jinak tuhé beamy jen zvoní.
 const DAMPING_RATIO: f32 = 0.25;
+// Koeficient tření pneumatika↔zem. Strop celkové vodorovné síly = MU·Fz (kruh adheze):
+// víc, než drží guma, nedá podélnou ani boční sílu (skluz/smyk).
+const MU: f32 = 1.0;
+
+// --- DRIVETRAIN ---
+// Part-shaped (připraveno na build systém): DÍLY jsou datové structy, RESOURCE drží,
+// které díly jsou v autě + runtime stav. Build systém díl vymění, tuning přepíše pole,
+// `.veh parts` se sem časem jen deserializují. Žádné magické konstanty v systémech.
+
+// Motor = díl. Moment podle RPM dá momentová křivka (body (rpm, Nm), lineární interpolace).
+struct Engine {
+    torque_curve: Vec<(f32, f32)>, // (rpm, Nm) — vzestupně podle rpm
+    max_rpm: f32,                  // omezovač otáček
+    idle_rpm: f32,                 // volnoběh (pod něj RPM neklesne)
+}
+
+// Převodovka = díl. Poměry kvaltů + stálý převod (rozvodovka).
+struct Gearbox {
+    ratios: Vec<f32>, // poměry pro kvalty 1..N
+    final_drive: f32, // stálý převod
+}
+
+// Rozvod pohonu = nastavení (data). Které osy táhnou + jak se mezi ně dělí moment.
+#[derive(Clone, Copy)]
+enum DriveLayout {
+    Fwd,                // přední pohon
+    Rwd,                // zadní pohon
+    Awd { front: f32 }, // 4×4: podíl momentu na přední osu (0..1), zadní = 1−front
+}
+
+impl DriveLayout {
+    // Podíl celkového momentu jdoucí na osu daného kola.
+    fn axle_fraction(self, front: bool) -> f32 {
+        match self {
+            DriveLayout::Fwd => if front { 1.0 } else { 0.0 },
+            DriveLayout::Rwd => if front { 0.0 } else { 1.0 },
+            DriveLayout::Awd { front: f } => if front { f } else { 1.0 - f },
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            DriveLayout::Fwd => "FWD",
+            DriveLayout::Rwd => "RWD",
+            DriveLayout::Awd { .. } => "AWD",
+        }
+    }
+}
+
+// Diferenciál mezi dvěma koly osy. `lock` 0 = otevřený (kola různě rychlá v zatáčce),
+// 1 = uzamčený (stejná rychlost → trakce), mezi = samosvorný (LSD). Data i runtime
+// (uzamykatelný diff = za běhu se `lock` přepne). Solver podle něj sváže rychlosti kol.
+struct Differential {
+    lock: f32, // 0..1
+}
+
+#[derive(Resource)]
+struct Drivetrain {
+    engine: Engine,         // namontovaný motor
+    gearbox: Gearbox,       // namontovaná převodovka
+    layout: DriveLayout,    // FWD/RWD/AWD (data, přepínatelné)
+    front_diff: Differential, // diff přední osy
+    rear_diff: Differential,  // diff zadní osy
+    gear: i32,              // runtime: -1 = zpátečka, 0 = neutrál, 1..=N = kvalty
+    rpm: f32,               // runtime: dopočítané otáčky (pro HUD i moment)
+    speed_kmh: f32,         // runtime: dopočítaná rychlost (pro HUD)
+}
+
+impl Default for Drivetrain {
+    fn default() -> Self {
+        Self {
+            engine: Engine {
+                // Hrubá benzínová křivka ~1.4 (vrchol kolem 3500–5000). Doladí se s motorem.
+                torque_curve: vec![(850.0, 90.0), (2000.0, 140.0), (3500.0, 175.0), (5000.0, 180.0), (6500.0, 150.0)],
+                max_rpm: 6500.0,
+                idle_rpm: 850.0,
+            },
+            gearbox: Gearbox { ratios: vec![3.5, 2.1, 1.4, 1.0, 0.8], final_drive: 3.9 },
+            layout: DriveLayout::Rwd,                 // start: zadní pohon
+            front_diff: Differential { lock: 0.0 },   // start: otevřené
+            rear_diff: Differential { lock: 0.0 },
+            gear: 1,
+            rpm: 0.0,
+            speed_kmh: 0.0,
+        }
+    }
+}
+
+// Marker textu HUDu (rychlost/kvalt/otáčky) — podle něj ho update systém najde a přepíše.
+#[derive(Component)]
+struct HudText;
 
 // Pomocné metody pro STAVBU soft-body. Jediný zdroj pravdy — používá je builder .veh
 // i builder auta, ať se logika (tlumení, substepy) nikde nerozjede.
@@ -429,9 +619,11 @@ fn spawn_solver_car(
 
     // --- Tělo: 8 rohů kvádru, PLNĚ provázané tuhými beamy (rám se nedá zkroutit) ---
     let (hx, hy, hz) = (0.7, 0.25, 1.8);
-    let body_mass = 15.0; // na jeden roh
+    let body_mass = 120.0; // na jeden roh (8× = 960 kg karoserie — realistický kvádr ~auto)
     let chassis_k = 300_000.0;
     let mut body: Vec<usize> = Vec::with_capacity(8);
+    // Klasifikace rohů pro směrový rám: front = +z, right = +x (viz veh_pos: forward auta = +Z).
+    let (mut front, mut rear, mut left, mut right) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for sx in [-1.0_f32, 1.0] {
         for sy in [-1.0_f32, 1.0] {
             for sz in [-1.0_f32, 1.0] {
@@ -444,10 +636,14 @@ fn spawn_solver_car(
                         Spawned,
                     ))
                     .id();
-                body.push(sb.add_node(p, body_mass, e));
+                let idx = sb.add_node(p, body_mass, e);
+                if sz > 0.0 { front.push(idx) } else { rear.push(idx) }
+                if sx > 0.0 { right.push(idx) } else { left.push(idx) }
+                body.push(idx);
             }
         }
     }
+    sb.chassis = Some(ChassisFrame { front, rear, left, right });
     // plný graf přes 8 rohů = 28 beamů → tuhý rám
     for a in 0..body.len() {
         for b in (a + 1)..body.len() {
@@ -458,17 +654,22 @@ fn spawn_solver_car(
     // --- 4 kola: hub-node (zavěšený na tělo) + render disk ---
     let wheel_radius = 0.34;
     let wheel_width = 0.22;
-    let hub_mass = 20.0;
+    let hub_mass = 35.0; // 4× = 140 kg (kolo+hub+brzda) → celkem ~1100 kg
     let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
+    // Sdílená značka u ráfku — kontrastní kostička, ať je vidět otáčení kola.
+    let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
+    let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
     let (wx, wy, wz) = (0.85, -0.15, 1.4);
-    let layout = [
-        (-1.0_f32, 1.0_f32, true, false),  // FL: řízené
-        (1.0, 1.0, true, false),           // FR: řízené
-        (-1.0, -1.0, false, true),         // RL: hnané
-        (1.0, -1.0, false, true),          // RR: hnané
+    // (sx, sz, steered) — front/řízení; KTERÁ kola táhnou rozhoduje DriveLayout, ne builder.
+    let wheel_layout = [
+        (-1.0_f32, 1.0_f32, true),  // FL: přední, řízené
+        (1.0, 1.0, true),           // FR: přední, řízené
+        (-1.0, -1.0, false),        // RL: zadní
+        (1.0, -1.0, false),         // RR: zadní
     ];
-    for (sx, sz, steered, driven) in layout {
+    for (sx, sz, steered) in wheel_layout {
+        let front = sz > 0.0; // přední osa = +z
         let hub_pos = origin + Vec3::new(sx * wx, wy, sz * wz);
         // debug kulička v ose hubu (drží Transform hubu); samotné kolo = disk níž
         let hub_dbg = commands
@@ -489,6 +690,15 @@ fn spawn_solver_car(
                 Transform::from_translation(hub_pos),
                 Spawned,
             ))
+            .with_children(|w| {
+                // Značka kouká kousek ZA běhoun (z > radius), ať není zabořená ve válci.
+                // Obíhá se spinem → vidíš otáčení. y = 0: jinak by seděla na ose (X) a netočila se.
+                w.spawn((
+                    Mesh3d(marker_mesh.clone()),
+                    MeshMaterial3d(marker_material.clone()),
+                    Transform::from_xyz(0.0, 0.0, wheel_radius + 0.03),
+                ));
+            })
             .id();
         sb.wheels.push(WheelC {
             hub,
@@ -497,11 +707,22 @@ fn spawn_solver_car(
             spin: 0.0,
             spin_vel: 0.0,
             steer: 0.0,
-            driven,
+            drive_torque: 0.0,
+            brake: 0.0,
+            front,
             steered,
-            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, grip: 8_000.0 },
+            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
         });
     }
+
+    // Viditelný trup: kvádr velikosti rámu. Transform mu přepisuje softbody_to_transforms.
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(2.0 * hx, 2.0 * hy, 2.0 * hz))),
+        MeshMaterial3d(materials.add(Color::srgb(0.6, 0.6, 0.7))),
+        Transform::from_translation(origin),
+        CarBody,
+        Spawned,
+    ));
 
     sb.compute_substeps();
     info!(
@@ -632,10 +853,17 @@ fn update_softbody_mesh(
     }
 }
 
+// Magic Formula (Pacejka): skluz `x` → síla. `d` = špička (μ·Fz). Křivka roste ke špičce
+// a ZA ní zase klesá — to je ten realismus oproti lineárnímu gripu (přebrzdění, smyk).
+fn magic_formula(x: f32, p: Pacejka, d: f32) -> f32 {
+    let bx = p.b * x;
+    d * (p.c * (bx - p.e * (bx - bx.atan())).atan()).sin()
+}
+
 // --- SOLVER: semi-implicitní Euler se substeppingem (běží ve FixedUpdate, 64 Hz) ---
 // Jeden snímek rozdělíme na `sb.substeps` malých kroků (adaptivně, viz compute_substeps),
 // aby tuhé beamy zůstaly stabilní (CFL: dt < 2/ω). Reálné tuhosti, žádné škálování.
-fn softbody_solve(sb: ResMut<SoftBody>, time: Res<Time<Fixed>>) {
+fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixed>>) {
     if sb.beams.is_empty() {
         return; // nic nespawnuto
     }
@@ -643,6 +871,7 @@ fn softbody_solve(sb: ResMut<SoftBody>, time: Res<Time<Fixed>>) {
     let gravity = Vec3::new(0.0, -9.81, 0.0);
     let ground_y = GROUND_TOP + 0.04; // horní hrana zemního kvádru + poloměr nodu
     let sub_dt = time.delta_secs() / sb.substeps as f32;
+    let (front_lock, rear_lock) = (dt.front_diff.lock, dt.rear_diff.lock); // diff osy
 
     for _ in 0..sb.substeps {
         // 1) vynuluj síly a přidej gravitaci (jen pohyblivým nodům)
@@ -665,19 +894,102 @@ fn softbody_solve(sb: ResMut<SoftBody>, time: Res<Time<Fixed>>) {
             sb.force[beam.j] -= f;
         }
 
-        // 2.5) svislá síla pneumatik: kontakt jako KRUH o poloměru kola (ne bod jako u nodů).
-        // Tím auto sedí na kolech místo zaboření hubu. Podélná/boční síla přijde v kroku 2.
-        // Indexový loop + kopie skalárů — abychom mohli zapsat do sb.force[hub] bez aliasingu.
+        // 2.5) směrový rám auta (yaw): dopředný a boční jednotkový vektor z referenčních nodů.
+        // Počítá se jednou za substep (před koly). U .veh (chassis None) zůstane nula → kola nejedou.
+        let (fwd, right) = match &sb.chassis {
+            Some(cf) => {
+                let mean = |idx: &[usize]| idx.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / idx.len() as f32;
+                let mut f = mean(&cf.front) - mean(&cf.rear);
+                let mut r = mean(&cf.right) - mean(&cf.left);
+                f.y = 0.0; // bereme jen vodorovný směr (náklon neřeší tire model)
+                r.y = 0.0;
+                (f.normalize_or_zero(), r.normalize_or_zero())
+            }
+            None => (Vec3::ZERO, Vec3::ZERO),
+        };
+
+        // 2.6) TIRE MODEL na každém kole: svislá (kruh o radius) + boční/podélný grip + spin.
+        // Indexový loop + kopie skalárů — ať můžeme zapsat do sb.force[hub]/sb.wheels bez aliasingu.
         for wi in 0..sb.wheels.len() {
             let hub = sb.wheels[wi].hub;
             let radius = sb.wheels[wi].radius;
             let ns = sb.wheels[wi].tire.normal_stiffness;
             let nd = sb.wheels[wi].tire.normal_damping;
+            let long = sb.wheels[wi].tire.long;
+            let lat = sb.wheels[wi].tire.lat;
+            let steer = sb.wheels[wi].steer;
+            let m_wheel = 1.0 / sb.inv_mass[hub];
+            let i_wheel = 0.5 * m_wheel * radius * radius; // moment setrvačnosti disku
+
+            // -- svislá síla (Fz) + vodorovná reakce pneumatiky, jen když se kolo dotýká --
             let pen = (GROUND_TOP + radius) - sb.pos[hub].y; // >0 = pneumatika stlačená
+            let mut f_long = 0.0; // reakce zpět na spin (mimo zem = 0)
             if pen > 0.0 {
                 let fy = ns * pen - nd * sb.vel[hub].y; // pružina nahoru − tlumení
                 if fy > 0.0 {
                     sb.force[hub].y += fy;
+
+                    // směr kola po natočení řízení (kolem svislé osy Y)
+                    let turn = Quat::from_rotation_y(steer);
+                    let wf = turn * fwd; // dopředný směr kola
+                    let wl = turn * right; // boční směr kola
+
+                    let v = sb.vel[hub];
+                    let v_long = v.dot(wf); // jak rychle se kontakt veze dopředu
+                    let v_lat = v.dot(wl); // boční skluz
+                    let roll = sb.wheels[wi].spin_vel * radius; // obvodová rychlost kola
+
+                    // Normalizace skluzu pro Pacejku (v_ref s dolní mezí = ochrana proti dělení 0).
+                    let v_ref = v_long.abs().max(V_LOW);
+                    let kappa = (roll - v_long) / v_ref; // slip ratio (podélně)
+                    let alpha = v_lat.atan2(v_ref); // slip angle v rad (bočně)
+
+                    let d = MU * fy; // špička křivky = μ·Fz (víc guma neudrží)
+                    let mut fl = magic_formula(kappa, long, d); // podélná síla (tah/brzda)
+                    let mut fc = magic_formula(-alpha, lat, d); // boční síla (brzdí smyk)
+
+                    // kruh adheze jako pojistka na kombinovaný skluz: |(podélná, boční)| ≤ MU·Fz
+                    let fmax = MU * fy;
+                    let mag = (fl * fl + fc * fc).sqrt();
+                    if mag > fmax {
+                        let s = fmax / mag;
+                        fl *= s;
+                        fc *= s;
+                    }
+                    sb.force[hub] += fl * wf + fc * wl;
+                    f_long = fl;
+                }
+            }
+
+            // -- dynamika otáčení kola: motor + brzda − reakce od podélné síly --
+            let spin_vel = sb.wheels[wi].spin_vel;
+            let brake_torque = -spin_vel.signum() * sb.wheels[wi].brake; // proti směru otáčení
+            let net = sb.wheels[wi].drive_torque + brake_torque - f_long * radius;
+            let new_spin_vel = spin_vel + net / i_wheel * sub_dt;
+            sb.wheels[wi].spin_vel = new_spin_vel;
+            sb.wheels[wi].spin += new_spin_vel * sub_dt; // úhel pro render
+        }
+
+        // 2.7) DIFERENCIÁL: sváž rychlosti kol stejné osy k jejich průměru podle `lock`.
+        // 0 = otevřený (kola volně různě rychlá → zatáčí, ale jedno protáčí), 1 = uzamčený
+        // (stejná rychlost → trakce, ale škube v zatáčce), mezi = samosvorný (LSD).
+        for (is_front, lock) in [(true, front_lock), (false, rear_lock)] {
+            if lock <= 0.0 {
+                continue; // otevřený diff = nic nesvazujeme
+            }
+            let (mut sum, mut c) = (0.0, 0.0);
+            for w in &sb.wheels {
+                if w.front == is_front {
+                    sum += w.spin_vel;
+                    c += 1.0;
+                }
+            }
+            if c > 0.0 {
+                let mean = sum / c;
+                for w in &mut sb.wheels {
+                    if w.front == is_front {
+                        w.spin_vel += (mean - w.spin_vel) * lock; // lerp k průměru
+                    }
                 }
             }
         }
@@ -705,100 +1017,243 @@ fn softbody_solve(sb: ResMut<SoftBody>, time: Res<Time<Fixed>>) {
 
 // Zápis stavu solveru → Transformy render entit (kuličky + disky kol). Mesh už pak
 // deformuje update_softbody_mesh, který čte tyhle Transformy. Běží v Update (po solveru).
-fn softbody_to_transforms(sb: Res<SoftBody>, mut transforms: Query<&mut Transform>) {
+fn softbody_to_transforms(
+    sb: Res<SoftBody>,
+    mut transforms: Query<&mut Transform>,
+    car_body: Query<Entity, With<CarBody>>,
+) {
     // Nody → kuličky.
     for (i, &entity) in sb.entities.iter().enumerate() {
         if let Ok(mut tf) = transforms.get_mut(entity) {
             tf.translation = sb.pos[i];
         }
     }
-    // Kola → disky: pozice = hub, rotace = řízení(Y) · valení(X) · base(válec Y→osa X).
+
+    // Orientace auta z chassis rámu (X=right, Y=up, Z=forward). Identita, když rám není (.veh).
+    let (car_rot, center) = match &sb.chassis {
+        Some(cf) => {
+            let mean = |idx: &[usize]| idx.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / idx.len() as f32;
+            let fwd = (mean(&cf.front) - mean(&cf.rear)).normalize_or_zero();
+            let r0 = (mean(&cf.right) - mean(&cf.left)).normalize_or_zero();
+            let up = fwd.cross(r0).normalize_or_zero();
+            let right = up.cross(fwd).normalize_or_zero(); // re-ortogonalizace
+            let center = (mean(&cf.front) + mean(&cf.rear)) * 0.5;
+            if up == Vec3::ZERO {
+                (Quat::IDENTITY, center) // zdegenerovaný rám
+            } else {
+                (Quat::from_mat3(&Mat3::from_cols(right, up, fwd)), center)
+            }
+        }
+        None => (Quat::IDENTITY, Vec3::ZERO),
+    };
+
+    // Trup → kvádr: sedí na těžišti rámu, natočený s autem.
+    for entity in &car_body {
+        if let Ok(mut tf) = transforms.get_mut(entity) {
+            tf.translation = center;
+            tf.rotation = car_rot;
+        }
+    }
+
+    // Kola → disky: pozice = hub, rotace = orientace auta · řízení(Y) · valení(X) · base(válec Y→osa X).
     let base = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     for wheel in &sb.wheels {
         if let Ok(mut tf) = transforms.get_mut(wheel.render) {
             tf.translation = sb.pos[wheel.hub];
-            tf.rotation = Quat::from_rotation_y(wheel.steer) * Quat::from_rotation_x(wheel.spin) * base;
+            tf.rotation =
+                car_rot * Quat::from_rotation_y(wheel.steer) * Quat::from_rotation_x(wheel.spin) * base;
         }
     }
 }
 
-// Pohon auta: plyn (W), zpátečka (S), brzda (mezerník). Běží každý snímek.
-// Query nám dá VŠECHNA kola: pár (data Wheel, jeho joint k autu).
-// Motor jointu roztáčí volnou osu kola na zadanou cílovou rychlost.
-fn vehicle_drive(keys: Res<ButtonInput<KeyCode>>, mut wheels: Query<(&Wheel, &mut ImpulseJoint)>) {
-    // Cílová úhlová rychlost otáčení kola (rad/s). Znaménko určuje směr.
-    let mut target_speed = 0.0;
-    if keys.pressed(KeyCode::KeyW) {
-        target_speed = 80.0; // plyn vpřed (vyšší = vyšší maximálka)
-    } else if keys.pressed(KeyCode::KeyS) {
-        target_speed = -80.0; // zpátečka
+// Moment motoru při daných otáčkách — lineární interpolace momentové křivky.
+// Nad max_rpm = omezovač (moment 0 → kolo se nemůže protáčet do nekonečna).
+fn engine_torque(rpm: f32, engine: &Engine) -> f32 {
+    if rpm >= engine.max_rpm {
+        return 0.0; // rev limiter
     }
-    let braking = keys.pressed(KeyCode::Space);
-
-    // Síla motoru = jak silně
-    // tlačí kola na cílovou rychlost (~tah / zrychlení).
-    let engine_power = 100.0;
-
-    for (wheel, mut joint) in &mut wheels {
-        if !wheel.driven {
-            continue; // motor dáváme jen na hnaná (zadní) kola
+    let c = &engine.torque_curve;
+    if rpm <= c[0].0 {
+        return c[0].1; // pod prvním bodem → držíme první hodnotu
+    }
+    for w in c.windows(2) {
+        let (r0, t0) = w[0];
+        let (r1, t1) = w[1];
+        if rpm <= r1 {
+            let f = (rpm - r0) / (r1 - r0); // 0..1 mezi body
+            return t0 + f * (t1 - t0);
         }
-        // (cílová_rychlost, factor) — factor = jak silně motor tlačí kolo na cíl.
-        let (vel, factor) = if braking {
-            (0.0, 8.0) // brzda: drž rychlost na nule, silně
-        } else {
-            (target_speed, engine_power)
-        };
-        // joint.data je TypedJoint (enum). Vytáhneme revolute variantu a roztočíme ji.
-        if let TypedJoint::RevoluteJoint(revolute) = &mut joint.data {
-            revolute.set_motor_velocity(vel, factor);
-        }
+    }
+    c.last().unwrap().1 // nad poslední bod → držíme poslední hodnotu
+}
+
+// Pohon auta. W = plyn, S = brzda, Space = ruční brzda; zpátečka = zařadit R (Q) a dát plyn.
+// Nepočítá fyziku — jen zapíše ZÁMĚR (moment na kola) z motoru přes převody; sílu řeší solver.
+fn vehicle_drive(keys: Res<ButtonInput<KeyCode>>, dt: Res<Drivetrain>, mut sb: ResMut<SoftBody>) {
+    let throttle = if keys.pressed(KeyCode::KeyW) { 1.0 } else { 0.0 };
+    let brake = if keys.pressed(KeyCode::KeyS) { 800.0 } else { 0.0 }
+        + if keys.pressed(KeyCode::Space) { 1500.0 } else { 0.0 }; // ruční brzda silnější
+
+    // Převod aktuálního kvaltu (R = opačný směr). Neutrál → 0 (motor točí, kola ne).
+    let ratio = match dt.gear {
+        0 => 0.0,
+        -1 => -dt.gearbox.ratios[0], // zpátečka: opačný smysl než 1. kvalt
+        g => dt.gearbox.ratios[(g - 1) as usize],
+    };
+    // Celkový moment z motoru: moment × plyn → přes převod a stálý převod.
+    let total = engine_torque(dt.rpm, &dt.engine) * throttle * ratio * dt.gearbox.final_drive;
+
+    // Rozdělení podle DriveLayoutu: každá osa dostane svůj podíl, ten se rozpočítá mezi
+    // její kola. Diferenciál (sváz rychlostí) řeší solver dle Drivetrain.{front,rear}_diff.
+    let front_n = sb.wheels.iter().filter(|w| w.front).count().max(1) as f32;
+    let rear_n = sb.wheels.iter().filter(|w| !w.front).count().max(1) as f32;
+
+    for wheel in &mut sb.wheels {
+        let axle = dt.layout.axle_fraction(wheel.front); // podíl pro osu tohoto kola
+        let n = if wheel.front { front_n } else { rear_n };
+        wheel.drive_torque = total * axle / n;
+        wheel.brake = brake; // brzdí všechna kola
     }
 }
 
-// Řízení (kinematické): A/D natáčí RÁM jointu řízených kol kolem Y.
-// Tím se natočí osa valení → kolo se s ní natočí. Je to pevná geometrie, ne síla,
-// takže se točí kola (ne trup) a nic se neklepe.
-fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, mut wheels: Query<(&Wheel, &mut ImpulseJoint)>) {
-    // Maximální úhel zatočení v radiánech (~0.5 rad ≈ 28°).
-    let max_angle = 0.5;
-    let mut steer_angle = 0.0;
+// Řízení: A/D natáčí přední kola kolem svislé osy. Plynule lerpne k cíli (ne skokem),
+// ať řízení nešvihne. Solver z `wheel.steer` odvodí směr pneumatiky (sekce 2.6).
+fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut sb: ResMut<SoftBody>) {
+    let max_angle = 0.5; // ~28°
+    let mut target = 0.0;
     if keys.pressed(KeyCode::KeyA) {
-        steer_angle = max_angle; // doleva
+        target = max_angle; // doleva
     } else if keys.pressed(KeyCode::KeyD) {
-        steer_angle = -max_angle; // doprava
+        target = -max_angle; // doprava
     }
+    let rate = 4.0 * time.delta_secs(); // max přírůstek úhlu za snímek
 
-    for (wheel, mut joint) in &mut wheels {
-        if !wheel.steered {
-            continue; // natáčíme jen přední (řízená) kola
-        }
-        // Řízené kolo má generic joint — otočíme jeho rám (local_basis1) kolem Y.
-        if let TypedJoint::GenericJoint(generic) = &mut joint.data {
-            generic.set_local_basis1(Quat::from_rotation_y(steer_angle));
+    for wheel in &mut sb.wheels {
+        if wheel.steered {
+            wheel.steer += (target - wheel.steer).clamp(-rate, rate);
         }
     }
 }
 
-// Chase kamera: drží se za autem podle jeho směru a kouká na něj.
-// Dva dotazy na Transform: auto čteme, kameru měníme. `Without<Chassis>` u kamery
-// říká Bevy, že to NEJSOU stejné entity (jinak by dva přístupy k Transform neprošly).
-fn follow_camera(
-    car: Query<&Transform, With<Chassis>>,
-    mut camera: Query<&mut Transform, (With<Camera3d>, Without<Chassis>)>,
+// Ovládání drivetrainu: E/Q = řazení, L = zámek diffu, K = přepnout pohon (FWD/RWD/AWD).
+// Počet kvaltů bere z namontované převodovky (díl), ne z konstanty.
+fn shift_gears(keys: Res<ButtonInput<KeyCode>>, mut dt: ResMut<Drivetrain>) {
+    let top = dt.gearbox.ratios.len() as i32;
+    if keys.just_pressed(KeyCode::KeyE) {
+        dt.gear = (dt.gear + 1).min(top); // nahoru, max nejvyšší kvalt
+    }
+    if keys.just_pressed(KeyCode::KeyQ) {
+        dt.gear = (dt.gear - 1).max(-1); // dolů, min zpátečka
+    }
+    // L = uzamykatelný diff: přepne lock obou os mezi 0 (otevřený) a 1 (uzamčený).
+    if keys.just_pressed(KeyCode::KeyL) {
+        let new = if dt.rear_diff.lock > 0.5 { 0.0 } else { 1.0 };
+        dt.front_diff.lock = new;
+        dt.rear_diff.lock = new;
+    }
+    // K = přepnout rozvod pohonu RWD → FWD → AWD(50:50) → …
+    if keys.just_pressed(KeyCode::KeyK) {
+        dt.layout = match dt.layout {
+            DriveLayout::Rwd => DriveLayout::Fwd,
+            DriveLayout::Fwd => DriveLayout::Awd { front: 0.5 },
+            DriveLayout::Awd { .. } => DriveLayout::Rwd,
+        };
+    }
+}
+
+// Dopočítá rychlost a otáčky z aktuálního stavu solveru (pro HUD).
+// Rychlost = vodorovná rychlost těžiště rámu; RPM = otáčky hnaných kol × převod × stálý.
+fn update_drivetrain(sb: Res<SoftBody>, mut dt: ResMut<Drivetrain>) {
+    let idle = dt.engine.idle_rpm; // kopie předem (čteme díl, pak píšeme runtime pole)
+    let layout = dt.layout;
+    let Some(cf) = &sb.chassis else {
+        dt.speed_kmh = 0.0;
+        dt.rpm = idle;
+        return;
+    };
+
+    // Rychlost: průměr rychlostí rohových nodů, jen vodorovná složka (m/s → km/h).
+    let nodes = cf.front.iter().chain(&cf.rear);
+    let n = (cf.front.len() + cf.rear.len()).max(1) as f32;
+    let mut v: Vec3 = nodes.map(|&i| sb.vel[i]).sum::<Vec3>() / n;
+    v.y = 0.0;
+    dt.speed_kmh = v.length() * 3.6;
+
+    // Otáčky kola: průměr |spin_vel| hnaných kol (dle layoutu) (rad/s).
+    let mut omega = 0.0;
+    let mut cnt = 0.0;
+    for w in &sb.wheels {
+        if layout.axle_fraction(w.front) > 0.0 {
+            omega += w.spin_vel.abs();
+            cnt += 1.0;
+        }
+    }
+    if cnt > 0.0 {
+        omega /= cnt;
+    }
+
+    // RPM = ω_kola × |převod| × stálý × (60/2π). Neutrál → jen volnoběh.
+    let final_drive = dt.gearbox.final_drive;
+    let ratio = match dt.gear {
+        0 => 0.0,                                       // neutrál: kola nespojená s motorem
+        -1 => dt.gearbox.ratios[0],                     // zpátečka: zatím poměr jako 1. kvalt
+        g => dt.gearbox.ratios[(g - 1) as usize],       // 1..=N
+    };
+    let rpm = omega * ratio * final_drive * (60.0 / std::f32::consts::TAU);
+    dt.rpm = rpm.max(idle); // pod volnoběh nikdy
+}
+
+// Přepíše HUD text aktuálními hodnotami z Drivetrain.
+fn update_hud(dt: Res<Drivetrain>, mut hud: Query<&mut Text, With<HudText>>) {
+    let gear = match dt.gear {
+        -1 => "R".to_string(),
+        0 => "N".to_string(),
+        g => g.to_string(),
+    };
+    let diff = if dt.rear_diff.lock > 0.5 { "ZAMČENÝ" } else { "otevřený" };
+    if let Ok(mut text) = hud.get_single_mut() {
+        text.0 = format!(
+            "{:>3.0} km/h\nKvalt {}\n{:>5.0} ot/min\n{}  diff: {}",
+            dt.speed_kmh, gear, dt.rpm, dt.layout.label(), diff
+        );
+    }
+}
+
+// Kamera: dva módy přepínané klávesou C — chase (za autem) a FPV (z kokpitu).
+// Stav auta čteme přímo ze SoftBody (centroid + směr z rohových nodů), auto nemá Transform.
+// `fpv` je Local<bool> — drží si ho systém sám mezi snímky (žádný extra resource netřeba).
+fn camera_control(
+    keys: Res<ButtonInput<KeyCode>>,
+    sb: Res<SoftBody>,
+    mut fpv: Local<bool>,
+    mut camera: Query<&mut Transform, With<Camera3d>>,
 ) {
-    // get_single = čekáme přesně jedno auto a jednu kameru; jinak nic neděláme.
-    let Ok(car_tf) = car.get_single() else { return; };
-    let Ok(mut cam_tf) = camera.get_single_mut() else { return; };
+    if keys.just_pressed(KeyCode::KeyC) {
+        *fpv = !*fpv; // překlop mód
+    }
 
-    // Směr, kam auto míří (jeho lokální +Z ve světě). Vynulujeme Y → bereme jen
-    // otočení kolem svislé osy (yaw), aby kamera nepodlétla zem při náklonu/skoku.
-    let mut heading = car_tf.rotation * Vec3::Z;
-    heading.y = 0.0;
-    let heading = heading.normalize_or_zero();
+    // Bez auta (žádný chassis rám) kameru nehýbeme.
+    let Some(cf) = &sb.chassis else { return };
+    let Ok(mut cam) = camera.get_single_mut() else { return };
+    let mean = |idx: &[usize]| idx.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / idx.len() as f32;
 
-    // Kamera za auto (proti směru jízdy) a nahoru, pak namíříme na auto.
-    let offset = -heading * 12.0 + Vec3::Y * 5.0;
-    cam_tf.translation = car_tf.translation + offset;
-    cam_tf.look_at(car_tf.translation, Vec3::Y);
+    let center = (mean(&cf.front) + mean(&cf.rear)) * 0.5; // těžiště rámu
+    let fwd = (mean(&cf.front) - mean(&cf.rear)).normalize_or_zero();
+    if fwd == Vec3::ZERO {
+        return; // zdegenerovaný rám → směr neznámý
+    }
+
+    if *fpv {
+        // FPV: oko kousek nad a před středem, koukáme po směru jízdy.
+        let eye = center + Vec3::Y * 0.5 + fwd * 0.3;
+        cam.translation = eye;
+        cam.look_at(eye + fwd, Vec3::Y);
+    } else {
+        // Chase: za auto (jen yaw, ať kamera nepodlétne zem při náklonu) a nahoru.
+        let mut heading = fwd;
+        heading.y = 0.0;
+        let heading = heading.normalize_or_zero();
+        cam.translation = center + (-heading * 12.0 + Vec3::Y * 5.0);
+        cam.look_at(center, Vec3::Y);
+    }
 }

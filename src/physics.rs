@@ -14,7 +14,7 @@ const WORLD_GROUP: Group = Group::GROUP_2;
 pub fn ground_physics() -> impl Bundle {
     (
         RigidBody::Fixed,
-        Collider::cuboid(25.0, 0.1, 25.0),
+        Collider::cuboid(2500.0, 0.1, 2500.0), // obří (vizuál sedí); solver stejně jede na math rovině
         Friction::new(2.0), // víc gripu (mezikrok proti "ledu", než přijde Pacejka)
         CollisionGroups::new(WORLD_GROUP, Group::ALL),
     )

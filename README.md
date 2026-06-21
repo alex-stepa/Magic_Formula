@@ -15,7 +15,8 @@ Parsuje BeamNG `.jbeam` soubory a konvertuje je do vlastního `.veh` formátu.
 Oddělený od hry, není součástí buildu.
 
 ### 2. `magic-formula` — hlavní hra
-Rust + Bevy, vlastní `.veh` formát, node-beam fyzika přes bevy_rapier3d.
+Rust + Bevy, vlastní `.veh` formát, node-beam fyzika na **vlastním solveru**
+(rapier zůstal jen pro statický svět/zem).
 
 ---
 
@@ -23,11 +24,13 @@ Rust + Bevy, vlastní `.veh` formát, node-beam fyzika přes bevy_rapier3d.
 
 | Co | Čím |
 |---|---|
-| Jazyk | Rust |
+| Jazyk | Rust (edition 2024) |
 | Engine | Bevy 0.15 |
-| Fyzika | bevy_rapier3d 0.28 |
+| Fyzika vozidel | **vlastní node-beam solver** (semi-implicitní Euler + adaptivní substepping) |
+| Fyzika světa | bevy_rapier3d 0.28 — jen statická zem / kolize světa |
+| Tire model | Magic Formula (Pacejka) — podélně i bočně, friction circle |
 | Formát vozidla | vlastní `.veh` (JSON) |
-| Mapa (základ) | flat procedural terrain |
+| Mapa (základ) | flat plane (placatá zem) |
 | Mapa (budoucnost) | OpenStreetMap + SRTM elevation |
 | Serializace | serde + serde_json |
 | CLI (jbeam-rs) | clap |
@@ -36,59 +39,73 @@ Rust + Bevy, vlastní `.veh` formát, node-beam fyzika přes bevy_rapier3d.
 
 ## Vlastní formát `.veh`
 
-Inspirovaný .jbeam ale úplně vlastní. Čitelný JSON.
+Inspirovaný .jbeam, ale úplně vlastní. Čitelný JSON. **Tohle je formát, který hra dnes
+reálně načítá** (`src/veh.rs`):
 
 ```json
 {
   "name": "skoda_fabia",
   "version": 1,
   "nodes": [
-    { "id": "n_chassis_fl", "pos": [-0.7, 0.3, 1.4], "mass": 15.0 },
-    { "id": "n_chassis_fr", "pos": [0.7, 0.3, 1.4], "mass": 15.0 },
-    { "id": "n_chassis_rl", "pos": [-0.7, 0.3, -1.4], "mass": 15.0 },
-    { "id": "n_chassis_rr", "pos": [0.7, 0.3, -1.4], "mass": 15.0 }
+    { "id": "t5", "pos": [0.0, 1.33, 0.98], "mass": 1.1 }
   ],
   "beams": [
-    { "a": "n_chassis_fl", "b": "n_chassis_fr", "stiffness": 8000.0, "damping": 300.0, "break_force": 999999.0 }
+    { "a": "fh1r", "b": "fs1r", "stiffness": 20000.0, "damping": 0.0 }
   ],
   "wheels": [
-    { "id": "w_fl", "node": "n_chassis_fl", "radius": 0.32, "width": 0.2, "driven": false, "steered": true }
+    { "name": "FR", "node1": "fw1rr", "node2": "fw1r", "dir": 1 }
   ],
-  "parts": [
-    { "id": "engine", "type": "engine", "torque": 180.0, "max_rpm": 6500.0, "node": "n_chassis_fr" },
-    { "id": "gearbox", "type": "gearbox", "ratios": [3.5, 2.1, 1.4, 1.0, 0.8], "final_drive": 3.9 }
+  "triangles": [
+    { "a": "fx2r", "b": "fh6r", "c": "fx2l" }
   ]
 }
 ```
 
+- `pos` je v BeamNG osách (z = nahoru); hra je při načtení překlápí na Bevy (y = nahoru).
+- `wheels.node1/node2` = nody osy kola, `dir` = strana/orientace.
+- `damping` z `.veh` se **nepoužívá** (bývá nespolehlivé) — hra si tlumení dopočítá z tuhosti.
+
+**Plánováno (zatím NENÍ ve formátu):** sekce `parts` (engine, gearbox, …) a `break_force`
+na beamech. Přijde s drivetrainem a build systémem.
+
 ---
 
-## Architektura — Bevy ECS
+## Architektura
 
 ### Klíčové principy
-- **Auto není jedna entita** — každý part je vlastní Bevy entita s komponentami
-- **Physics per part** — rapier body per wheel/chassis node
-- **World je trait** — abstrakce nad terrainem pro budoucí OSM swap
+- **Solver je hloupý integrátor.** Fyzikální stav celého auta žije v JEDNOM resource
+  `SoftBody` jako Structure-of-Arrays (`pos`/`vel`/`inv_mass`/`force`/`beams`/`wheels`).
+  Beamy a kola odkazují na nody **indexem**, ne přes Entity.
+- **Render = entity.** Každý node (kulička), kolo (disk) i trup je Bevy entita; každý
+  snímek se jí přepíše `Transform` z pozic v solveru.
+- **Variabilita patří do builderů**, ne do solveru. Custom díly, tuning a typy zavěšení
+  se „vlévají" při stavbě auta (`spawn_solver_car`, `build_suspension`), solver se nemění.
+- **World bude trait** — abstrakce nad terénem pro budoucí OSM swap (zatím placatá zem).
+- **Směr (cíl):** build/tuning systém půjde k **per-part datové vrstvě / entitám** nad
+  `SoftBody` (parts = engine, gearbox…). SoA solver je základ, parts se staví nad ním.
 
-### Entity struktura
-
-```
-VehicleRoot (entita)
-├── Chassis (entita) — rapier RigidBody
-│   ├── Node entita × N — mass points
-│   └── Beam entita × N — spring/damper constraints
-├── Wheel (entita) × 4 — rapier RigidBody + Joint
-├── Engine (entita) — torque, RPM
-└── Gearbox (entita) — gear ratios
-```
-
-### Klíčové Bevy komponenty
+### Stav v paměti (resource `SoftBody`)
 
 ```rust
-#[derive(Component)] struct VehicleNode { id: String, mass: f32 }
-#[derive(Component)] struct VehicleBeam { node_a: Entity, node_b: Entity, stiffness: f32, damping: f32 }
-#[derive(Component)] struct Wheel { radius: f32, driven: bool, steered: bool }
-#[derive(Component)] struct Engine { torque: f32, max_rpm: f32, current_rpm: f32 }
+struct SoftBody {
+    pos: Vec<Vec3>, vel: Vec<Vec3>, inv_mass: Vec<f32>, force: Vec<Vec3>, // nody (SoA)
+    beams: Vec<BeamC>,                 // pružiny mezi indexy nodů
+    wheels: Vec<WheelC>,               // kola = hub-node + stav pneumatiky
+    entities: Vec<Entity>,             // node index ↔ render entita
+    chassis: Option<ChassisFrame>,     // referenční nody pro směr/orientaci auta
+    substeps: u32,                     // adaptivně z CFL
+}
+```
+
+### Klíčové typy
+
+```rust
+struct BeamC { i: usize, j: usize, rest: f32, k: f32, d: f32 }
+struct WheelC { hub: usize, radius: f32, spin: f32, spin_vel: f32, steer: f32,
+                drive_torque: f32, brake: f32, driven: bool, steered: bool, tire: TireParams }
+struct TireParams { normal_stiffness: f32, normal_damping: f32, long: Pacejka, lat: Pacejka }
+struct Pacejka { b: f32, c: f32, e: f32 } // Magic Formula koeficienty
+enum SuspensionKind { Rigid /* McPherson, DoubleWishbone, LeafSpring… */ }
 ```
 
 ---
@@ -97,70 +114,65 @@ VehicleRoot (entita)
 
 ```
 src/
-├── main.rs        ← App setup, WindowPlugin, systémy
-├── physics.rs     ← Fyzika, collidery, RigidBody
-└── (další moduly přibudou)
+├── main.rs    ← App setup, solver, tire model, builder aut, UI, kamera (zatím vše tady)
+├── physics.rs ← jen statický svět (zem) jako impl Bundle pro rapier
+└── veh.rs     ← načtení vlastního .veh (serde)
 ```
 
+**Plán:** `main.rs` rozdělit — solver/tire/vozidlo do vlastního modulu (`solver.rs` / `vehicle.rs`).
+
 ---
 
-## Základ na léto (scope)
+## Co je hotové
 
-### `jbeam-rs` (2–3 týdny)
-- [x] Parsování `.jbeam` souboru (vlastní preprocess — jbeam má chybějící čárky, ne čistý json5)
-- [ ] Konverze nodes, beams, **wheels** do `.veh` (nodes + beams hotové, wheels zbývají)
+### `jbeam-rs` (konvertor)
+- [x] Parsování `.jbeam` (vlastní preprocess — jbeam má chybějící čárky, není čistý json5)
+- [x] Konverze nodes, beams, **wheels**, triangles do `.veh`
 - [x] CLI: `jbeam-rs input.jbeam -o output.veh`
-- [x] Test na Škoda Fabia souboru (part `fabia_body`)
+- [x] Test na Škoda Fabia (`assets/fabia.veh`: 500 nodů, 5871 beamů, 4 kola, 791 triangů)
 
-### `magic-formula` základ (3–4 týdny)
-- [x] Bevy projekt setup + bevy_rapier3d
-- [x] Okno, kamera, světlo, ground plane, auto placeholder
-- [x] Modulární struktura (physics.rs)
-- [x] Collider na zem + RigidBody na auto
-- [ ] `.veh` loader (deserializace do ECS entit)
-- [x] Chassis jako rapier rigid body
-- [x] 4 kola s rapier joints
-- [x] Základní input (plyn, brzda, řízení)
-- [x] Chase kamera za autem (volná WASD kamera vynechána — nepotřebná)
+### `magic-formula`
+- [x] Bevy setup, okno, kamera, světlo, placatá zem
+- [x] `.veh` loader (deserializace + stavba soft-body)
+- [x] **Vlastní node-beam solver** (nahradil rapier soft-body i rapier rigid auto)
+- [x] Adaptivní substepping z CFL (stabilita reálných tuhostí, žádný škálovací hack)
+- [x] Tire model: Pacejka podélně i bočně, friction circle, dynamika spinu
+- [x] Pohon / brzda / plynulé řízení (vstup zapisuje záměr, sílu řeší solver)
+- [x] Chase + FPV kamera (přepínání klávesou C)
+- [x] Spawn menu UI (klávesy 1/2/3, Shift+C = clear)
 
-### Co základ NENÍ
-- ❌ Real OSM lokace
-- ❌ Build system
-- ❌ Rally checkpointy
-- ❌ Soft-body node-beam (zatím rapier rigid body)
-- ❌ Multiplayer
+### Zatím NENÍ
+- ❌ Řiditelné `.veh` auto (Fabia se načte jako blob — kola/chassis se ještě nenapojují) → **krok A**
+- ❌ Opravdové zavěšení (kola jsou tuze přibita) → **krok B**
+- ❌ Drivetrain (motor s křivkou + převodovka; teď placatý moment) → **krok C**
+- ❌ Terén (jen placatá rovina) → **krok D**
+- ❌ Doladěný tire model (hodnoty se ladí)
+- ❌ Real OSM lokace, build system, rally checkpointy, multiplayer
 
 ---
 
-## Roadmap po prázdninách
+## Roadmap
 
-### Fáze 2 — Fyzika
-- Vlastní soft-body solver (node-beam nad rapier nebo místo něj)
-- Pacejka tire model
-- Suspension geometry (wishbone, McPherson)
-- Weight transfer
+### Fáze 2 — Fyzika (PRÁVĚ TEĎ)
+Pořadí dalších kroků:
+- **A) Rozjet `.veh` auto** — napojit kola (`wheels` sekce) na hub-nody, odvodit `ChassisFrame`
+  z pozic nodů, postavit zavěšení → řídí se skutečná Fabia, ne hardcoded kvádr.
+- **B) Opravdové zavěšení** — `SuspensionKind` dál než `Rigid` (McPherson / wishbone se zdvihem).
+- **C) Drivetrain** — motor (momentová křivka, RPM) + převodovka (ratios, final drive).
+- **D) Terén** — `World` trait, heightfield kolize, weight transfer na svazích.
+- Průběžně: **ladění tire modelu** (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
 ### Fáze 3 — Svět
-- OSM data loader (openstreetmap-rs nebo vlastní parser)
-- SRTM elevation → terrain mesh
-- Jedna reálná lokace (Praha okolí?)
-- Road mesh generátor z OSM ways
+- OSM data loader, SRTM elevation → terrain mesh, road mesh z OSM ways, jedna reálná lokace
 
 ### Fáze 4 — Build system
-- Part inventory systém
-- Assembly UI (My Summer Car styl)
-- Part kompatibilita
-- Tuning parametry (Automation styl)
+- Part inventory, assembly UI (My Summer Car styl), kompatibilita, tuning (Automation styl)
 
 ### Fáze 5 — Game modes
-- Freeroam
-- Rally checkpointy + timer
-- Ghost replay systém
+- Freeroam, rally checkpointy + timer, ghost replay
 
 ### Fáze 6 — Steam
-- Steam Direct ($100 fee)
-- Achievements, leaderboards
-- Workshop pro vlastní `.veh` soubory
+- Steam Direct, achievements, leaderboards, Workshop pro vlastní `.veh`
 
 ---
 
@@ -168,10 +180,10 @@ src/
 
 | Kdy | Co |
 |---|---|
-| Během Bevy | ECS pattern, Bevy docs, bevy_rapier3d examples |
-| Před fází 2 | Pacejka papers, iforce2d.net vehicle physics |
+| Během Bevy | ECS pattern, Bevy docs |
+| Fyzika | Pacejka papers, iforce2d.net vehicle physics, explicitní integrátory + CFL stabilita |
 | Před fází 3 | GeoJSON spec, OSM data format, SRTM format |
-| Během parseru | serde, error handling, clap, json5 |
+| Konvertor | serde, error handling, clap, json5 |
 
 ---
 
@@ -179,7 +191,7 @@ src/
 
 - **Bevy**: bevyengine.org/learn
 - **bevy_rapier3d**: rapier.rs/docs
-- **Vehicle physics**: iforce2d.net/b2dtut/vehicle-physics (2D ale principy platí)
+- **Vehicle physics**: iforce2d.net/b2dtut/vehicle-physics (2D, ale principy platí)
 - **Pacejka**: hledej "Magic Formula tire model explained"
 - **OSM data**: download.geofabrik.de (free OSM dumps)
 - **SRTM elevation**: earthexplorer.usgs.gov

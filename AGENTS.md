@@ -17,9 +17,9 @@ hotová řešení.
 ## O projektu
 
 Magic Formula = rally + freeroam car physics sim v Rustu, inspirovaný BeamNG.
-Modulární car fyzika (node-beam), vlastní `.veh` formát. Cíl: případně Steam.
+Modulární node-beam fyzika na **vlastním solveru**, vlastní `.veh` formát. Cíl: případně Steam.
 
-Plný kontext, roadmapa a scope: viz [README.md](../README.md).
+Plný kontext, roadmapa a scope: viz [README.md](README.md).
 
 ## Tech stack
 
@@ -27,37 +27,57 @@ Plný kontext, roadmapa a scope: viz [README.md](../README.md).
 |---|---|
 | Jazyk | Rust (edition 2024) |
 | Engine | Bevy 0.15 |
-| Fyzika | bevy_rapier3d 0.28 |
+| Fyzika **vozidel** | **vlastní node-beam solver** (semi-implicitní Euler + adaptivní substepping) |
+| Fyzika **světa** | bevy_rapier3d 0.28 — **jen statická zem / kolize světa**, NE vozidla |
 | Formát vozidla | vlastní `.veh` (JSON, serde) |
 
 ## Struktura
 
 ```
 src/
-├── main.rs     ← App setup, pluginy, systémy (setup, camera_mode)
-└── physics.rs  ← fyzikální komponenty (RigidBody + Collider) jako funkce -> impl Bundle
-jbeam-rs/       ← SAMOSTATNÝ konvertor .jbeam → .veh (vlastní Cargo projekt, není součástí hry)
+├── main.rs    ← App setup, solver, tire model, builder aut, UI, kamera (zatím VŠE tady)
+├── physics.rs ← JEN statický svět (zem) jako funkce -> impl Bundle pro rapier
+└── veh.rs     ← načtení vlastního .veh (serde Deserialize)
+jbeam-rs/      ← SAMOSTATNÝ konvertor .jbeam → .veh (vlastní Cargo projekt, není součástí hry)
 ```
 
 Pozn.: dvě `src/` složky jsou záměr — `./src` je hra, `jbeam-rs/src` je konvertor.
+**PLÁN:** `main.rs` je obtloustlý — solver/tire/vozidlo se mají vyčlenit do vlastního
+modulu (`solver.rs` / `vehicle.rs`). Při větší úpravě fyziky to zvaž.
+
+## Architektura — jak auto reálně funguje
+
+- **Fyzikální stav vozidla žije v JEDNOM resource `SoftBody`** (Structure-of-Arrays:
+  `pos`/`vel`/`inv_mass`/`force`/`beams`/`wheels`). Solver je **hloupý integrátor** nad indexy.
+- **Render = entity** per node (kulička) a per kolo (disk) + trup; každý snímek se jim
+  přepíše `Transform` z pozic v solveru.
+- **Variabilita** (custom díly, tuning, typy zavěšení) patří do **builderů při spawnu**,
+  ne do smyčky solveru. Kolo = node + kruhový kontakt; pérování = beamy (`build_suspension`).
+- **SMĚR (cíl):** build/tuning systém půjde k **per-part datové vrstvě / entitám** nad
+  `SoftBody` (parts = engine, gearbox, …). SoA solver je základ, parts se staví nad ním.
 
 ## Konvence
 
 - Komentáře a komunikace **v češtině** (autor tak píše).
-- Fyzika patří do `physics.rs`, ne přímo do `main.rs` setup.
 - `Collider::cuboid` bere **poloviční** rozměry (half-extents), ne celé!
-- Architektura: auto NENÍ jedna entita — každý part (chassis, kola, engine) je
-  vlastní entita. Drž se toho, ať jde později vyměnit rigid body za softbody.
+- **Rapier je jen pro statický svět** (zem). Vozidla NIKDY přes rapier — vše na vlastním solveru.
+- **Reálné tuhosti z `.veh`, ŽÁDNÉ škálování** (starý ×0.01/cap hack je pryč). Stabilitu řeší
+  adaptivní substepping (CFL na úrovni uzlu) + tlumení škálované tuhostí (`d=2·ζ·√(k·μ)`).
 
 ## Build / běh
 
 ```bash
-cargo run       # spustí hru
-cargo check     # rychlá kontrola, že se to přeloží
+cargo run --release   # fyzika je náročná (Fabia ~stovky substepů/snímek) → release!
+cargo check           # rychlá kontrola, že se to přeloží
 ```
 
 ## Aktuální fáze
 
-Základ hry (léto): okno, kamera, světlo, zem, auto placeholder — hotovo.
-Právě se dělá: **Collider na zem + RigidBody na auto** v `physics.rs`.
-Další: `.veh` loader, kola s joints, input, kamery. Softbody až ve Fázi 2.
+**Fáze 2 — Fyzika.** Hotovo: vlastní node-beam solver (nahradil rapier soft-body),
+jednotný model aut na solveru, tire model (Pacejka podélně i bočně, friction circle,
+dynamika spinu), chase/FPV kamera. **SE LADÍ:** hodnoty tire modelu (Pacejka `b/c/e`,
+`MU`, grip, `V_LOW`) — ještě není doladěné.
+
+Další (pořadí): **A)** rozjet `.veh` auto (kola + chassis rám z `.veh`) → **B)** opravdové
+zavěšení (`SuspensionKind` dál než `Rigid`) → **C)** drivetrain (motor + převodovka) →
+**D)** terén. Ladění tire modelu běží průběžně.
