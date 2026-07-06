@@ -174,6 +174,13 @@ Pořadí dalších kroků:
 ### Fáze 6 — Steam
 - Steam Direct, achievements, leaderboards, Workshop pro vlastní `.veh`
 
+### Možný budoucí scope (nezávazné)
+- **Vizuální deformace / damage** — plastická deformace beamů při nárazu + přepočet
+  render meshe (trvalé promáčkliny, ne jen pružné zhoupnutí).
+- **Alternativní rapier rigid-body mód vozidla** — tuhá tělesa místo node-beamu jako
+  volitelná varianta (rychlejší, bez deformace) VEDLE stávajícího solveru.
+  Node-beam solver zůstává výchozí; rapier by byl jen druhá cesta.
+
 ---
 
 ## Učení paralelně

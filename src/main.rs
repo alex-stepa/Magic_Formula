@@ -148,7 +148,7 @@ fn spawn_hud(commands: &mut Commands) {
 // Co dané tlačítko / klávesa udělá.
 #[derive(Component, Clone)]
 enum SpawnAction {
-    RigidCar,         // jezdící kvádr + 4 kola
+    RigidCar,         // tuhá node-beam konfigurace (kvádr + 4 kola), NE rapier rigid-body
     SoftBody(String), // node-beam soft-body z .veh souboru na téhle cestě
     Clear,            // smaže všechna naspawnovaná auta
 }
@@ -478,7 +478,7 @@ fn spawn_ui(commands: &mut Commands) {
                 MenuPanel,
             ))
             .with_children(|panel| {
-                spawn_button(panel, "1 — Rigid auto (jezdící)", SpawnAction::RigidCar);
+                spawn_button(panel, "1 — Testovací vůz (tuhý rám)", SpawnAction::RigidCar);
                 for (i, path) in available_vehs().iter().enumerate() {
                     let file = path.file_name().unwrap().to_string_lossy();
                     let label = format!("{} — Soft-body: {file}", i + 2);
