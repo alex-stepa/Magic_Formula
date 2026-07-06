@@ -1,5 +1,4 @@
 target/
 *.zip
-jbeam-rs/samples/
-jbeam-rs/*.veh
+tools/jbeam-rs/
 assets/fabia.veh
