@@ -5,6 +5,7 @@
 use bevy::prelude::*;
 
 use crate::vehicle::Drivetrain;
+use crate::world::Terrain;
 
 // --- VLASTNÍ SOFT-BODY SOLVER (Fáze 2) ---
 // Stav soft-body držíme my, ne rapier. Structure-of-Arrays: index i = jeden nod,
@@ -170,13 +171,14 @@ pub fn magic_formula(x: f32, p: Pacejka, d: f32) -> f32 {
 // --- SOLVER: semi-implicitní Euler se substeppingem (běží ve FixedUpdate, 64 Hz) ---
 // Jeden snímek rozdělíme na `sb.substeps` malých kroků (adaptivně, viz compute_substeps),
 // aby tuhé beamy zůstaly stabilní (CFL: dt < 2/ω). Reálné tuhosti, žádné škálování.
-pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixed>>) {
+pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixed>>, terrain: Res<Terrain>) {
     if sb.beams.is_empty() {
         return; // nic nespawnuto
     }
     let sb = sb.into_inner(); // rozbalíme ResMut → můžeme půjčovat víc polí najednou
+    let world = terrain.0.as_ref(); // terén: solver se ptá jen na height/normal
     let gravity = Vec3::new(0.0, -9.81, 0.0);
-    let ground_y = GROUND_TOP + 0.04; // horní hrana zemního kvádru + poloměr nodu
+    let node_r = 0.04; // poloměr nodu nad povrchem
     let sub_dt = time.delta_secs() / sb.substeps as f32;
     // Tangenciální tření země je per-substep násobení rychlosti. To se ALE umocňuje počtem
     // substepů: 0.9^4 (test auto) je mírné, ale 0.9^382 (velké .veh) = ~0 → každý dotyk přilepí.
@@ -232,18 +234,23 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
             let m_wheel = 1.0 / sb.inv_mass[hub];
             let i_wheel = 0.5 * m_wheel * radius * radius; // moment setrvačnosti disku
 
-            // -- svislá síla (Fz) + vodorovná reakce pneumatiky, jen když se kolo dotýká --
-            let pen = (GROUND_TOP + radius) - sb.pos[hub].y; // >0 = pneumatika stlačená
+            // -- normálová síla (Fz) + reakce pneumatiky v tečné rovině, jen při dotyku --
+            // Výška a normála terénu pod kolem; penetrace se měří svisle (u sklonů do
+            // ~20° je chyba proti měření podél normály zanedbatelná).
+            let h = world.height(sb.pos[hub].x, sb.pos[hub].z);
+            let n = world.normal(sb.pos[hub].x, sb.pos[hub].z);
+            let pen = (h + radius) - sb.pos[hub].y; // >0 = pneumatika stlačená
             let mut f_long = 0.0; // reakce zpět na spin (mimo zem = 0)
             if pen > 0.0 {
-                let fy = ns * pen - nd * sb.vel[hub].y; // pružina nahoru − tlumení
+                let fy = ns * pen - nd * sb.vel[hub].dot(n); // pružina podél normály − tlumení
                 if fy > 0.0 {
-                    sb.force[hub].y += fy;
+                    sb.force[hub] += fy * n;
 
-                    // směr kola po natočení řízení (kolem svislé osy Y)
+                    // směr kola po natočení řízení (kolem svislé osy Y), promítnutý do
+                    // tečné roviny terénu — na svahu jede síla „po povrchu", ne vodorovně
                     let turn = Quat::from_rotation_y(steer);
-                    let wf = turn * fwd; // dopředný směr kola
-                    let wl = turn * right; // boční směr kola
+                    let wf = (turn * fwd - n * (turn * fwd).dot(n)).normalize_or_zero(); // dopředný směr kola
+                    let wl = (turn * right - n * (turn * right).dot(n)).normalize_or_zero(); // boční směr kola
 
                     let v = sb.vel[hub];
                     let v_long = v.dot(wf); // jak rychle se kontakt veze dopředu
@@ -321,14 +328,18 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
             sb.vel[i] += sb.force[i] * sb.inv_mass[i] * sub_dt;
             sb.pos[i] += sb.vel[i] * sub_dt;
 
-            // Zem: vytlač nad rovinu a utlum odraz (normála) i tření (tangenta).
-            if sb.pos[i].y < ground_y {
-                sb.pos[i].y = ground_y;
-                if sb.vel[i].y < 0.0 {
-                    sb.vel[i].y = 0.0; // žádný skok zpět (nepružná zem)
+            // Zem: vytlač nad povrch terénu a utlum odraz (normála) i tření (tangenta).
+            let h = world.height(sb.pos[i].x, sb.pos[i].z) + node_r;
+            if sb.pos[i].y < h {
+                sb.pos[i].y = h;
+                let n = world.normal(sb.pos[i].x, sb.pos[i].z);
+                let vn = sb.vel[i].dot(n);
+                if vn < 0.0 {
+                    sb.vel[i] -= vn * n; // žádný skok zpět (nepružná zem)
                 }
-                sb.vel[i].x *= tang_keep; // hrubé tření (substep-nezávislé), než přijde pořádný model
-                sb.vel[i].z *= tang_keep;
+                // hrubé tření v tečné rovině (substep-nezávislé), než přijde pořádný model
+                let vn = sb.vel[i].dot(n);
+                sb.vel[i] = n * vn + (sb.vel[i] - n * vn) * tang_keep;
             }
         }
     }

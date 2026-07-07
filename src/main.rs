@@ -11,9 +11,11 @@ mod physics; // načte modul z src/physics.rs (fyzikální komponenty)
 mod veh; // načítání .veh formátu (Fáze 2 — node-beam soft-body)
 mod solver; // jádro fyziky: SoftBody, node-beam solver, tire model
 mod vehicle; // auto: zavěšení, drivetrain, buildery, ovládání
+mod world; // terén jako trait (rovina / kopce / časem OSM heightfield)
 
 use solver::*;
 use vehicle::*;
+use world::Terrain;
 
 fn main() {
     App::new()
@@ -33,6 +35,7 @@ fn main() {
         .init_resource::<SoftBody>()
         .init_resource::<Drivetrain>()
         .init_resource::<CarBuild>()
+        .init_resource::<Terrain>()
         .add_systems(Startup, setup)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
         .add_systems(FixedUpdate, softbody_solve)
@@ -50,6 +53,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    terrain: Res<Terrain>,
 ) {
     // Kamera ve výšce 8, kus dozadu (z=15), kouká do středu světa (0,0,0).
     commands.spawn(Camera3d::default()).insert(Transform::from_xyz(0.0, 8.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y));
@@ -64,19 +68,20 @@ fn setup(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, -0.5, 0.0)),
     ));
 
-    // Zem: obří plochý plane s mřížkovou texturou (záchytné body na vnímání rychlosti).
-    // Fyzika je stejně nekonečná — solver kontaktuje rovinu y = GROUND_TOP bez hranic.
-    let ground_size = 5000.0;
-    let cell = 5.0; // velikost jedné buňky mřížky v metrech
+    // Zem: mesh terénu (mřížka vzorkuje Terrain) s mřížkovou texturou. FYZIKA jede
+    // z Terrain přímo (height/normal v solveru) a je nekonečná — mesh je jen render.
+    let ground_size = 4000.0;
+    let mesh_step = 8.0; // hustota mřížky meshe (m) — kopce (λ 80 m) vzorkuje ~10× na vlnu
+    let cell = 5.0; // velikost jedné buňky mřížkové textury v metrech
     let ground_mat = materials.add(StandardMaterial {
         base_color_texture: Some(images.add(grid_texture())),
-        // Dlaždice se opakuje (ground_size/cell)× přes celý plane → mřížka po 5 m.
+        // Dlaždice se opakuje (ground_size/cell)× přes celý mesh → mřížka po 5 m.
         uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(ground_size / cell)),
         perceptual_roughness: 0.95,
         ..default()
     });
     commands
-        .spawn((Mesh3d(meshes.add(Plane3d::default().mesh().size(ground_size, ground_size))), MeshMaterial3d(ground_mat)))
+        .spawn((Mesh3d(meshes.add(world::terrain_mesh(terrain.0.as_ref(), ground_size, mesh_step))), MeshMaterial3d(ground_mat)))
         .insert(physics::ground_physics());
 
     // Auto se na startu NEspawnuje — vybereš ho v UI (tlačítka) nebo klávesou 1/2/3.
