@@ -628,7 +628,7 @@ fn clear_spawned(commands: &mut Commands, spawned: &Query<Entity, With<Spawned>>
     *softbody = SoftBody::default(); // ať po smazání nezůstanou viset nody bez entit
 }
 
-// Klávesové zkratky: 1 = rigid auto, 2 = test.veh, 3 = fabia.veh (pokud existuje).
+// Klávesové zkratky: 1 = testovací vůz, 2+ = .veh soubory z assets (pokud existují).
 fn spawn_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
     spawned: Query<Entity, With<Spawned>>,
@@ -1143,7 +1143,7 @@ fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixe
     let ground_y = GROUND_TOP + 0.04; // horní hrana zemního kvádru + poloměr nodu
     let sub_dt = time.delta_secs() / sb.substeps as f32;
     // Tangenciální tření země je per-substep násobení rychlosti. To se ALE umocňuje počtem
-    // substepů: 0.9^4 (test auto) je mírné, ale 0.9^382 (Fabia) = ~0 → každý dotyk přilepí.
+    // substepů: 0.9^4 (test auto) je mírné, ale 0.9^382 (velké .veh) = ~0 → každý dotyk přilepí.
     // Přepočítáme faktor tak, aby výsledek za SNÍMEK byl stejný (~0.7) bez ohledu na substepy.
     let tang_keep = 0.7_f32.powf(1.0 / sb.substeps as f32);
     let (front_lock, rear_lock) = (dt.front_diff.lock, dt.rear_diff.lock); // diff osy

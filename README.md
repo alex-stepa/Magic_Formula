@@ -44,7 +44,7 @@ reálně načítá** (`src/veh.rs`):
 
 ```json
 {
-  "name": "skoda_fabia",
+  "name": "example_car",
   "version": 1,
   "nodes": [
     { "id": "t5", "pos": [0.0, 1.33, 0.98], "mass": 1.1 }
@@ -105,7 +105,8 @@ struct WheelC { hub: usize, radius: f32, spin: f32, spin_vel: f32, steer: f32,
                 drive_torque: f32, brake: f32, front: bool, steered: bool, tire: TireParams }
 struct TireParams { normal_stiffness: f32, normal_damping: f32, long: Pacejka, lat: Pacejka }
 struct Pacejka { b: f32, c: f32, e: f32 } // Magic Formula koeficienty
-enum SuspensionKind { Rigid /* McPherson, DoubleWishbone, LeafSpring… */ }
+enum SuspensionKind { Rigid, Coil { arm_k, coil_k } /* McPherson, DoubleWishbone… */ }
+struct CarBuild { suspension: SuspensionKind } // resource: vybrané díly (build systém)
 ```
 
 ---
@@ -129,7 +130,7 @@ src/
 - [x] Parsování `.jbeam` (vlastní preprocess — jbeam má chybějící čárky, není čistý json5)
 - [x] Konverze nodes, beams, **wheels**, triangles do `.veh`
 - [x] CLI: `jbeam-rs input.jbeam -o output.veh`
-- [x] Test na Škoda Fabia (500 nodů, 5871 beamů, 4 kola, 791 triangů; `.veh` assety se v repu nedrží)
+- [x] Otestováno na reálném `.jbeam` autě (500 nodů, 5871 beamů, 4 kola, 791 triangů; `.veh` assety se v repu nedrží)
 
 ### `magic-formula`
 - [x] Bevy setup, okno, kamera, světlo, placatá zem
@@ -142,12 +143,18 @@ src/
 - [x] Spawn menu UI („Testovací vůz" + případné `.veh`, Shift+C = clear)
 - [x] Řiditelný vůz na solveru: kola napojená na hub-nody + `ChassisFrame` z pozic nodů → **krok A**
 - [x] Drivetrain: motor (momentová křivka, RPM) + převodovka + diff/AWD → **krok C**
+- [x] Zavěšení se svislým zdvihem (`SuspensionKind::Coil`) u test auta → **krok B, část 1**:
+  2 tuhá ~vodorovná ramena (drží kolo v ose) + měkčí ~svislá pružina s tlumičem — trik
+  geometrie, solver netknutý. + stabilizátor (V-nod nad osou) + trakční kontrola rozjezdu
+- [x] Build menu (první díl): `CarBuild` resource, výběr zavěšení Rigid/Coil v menu
+  s live zvýrazněním; přepnutí za běhu přestaví stojící auto
 
 ### Zatím NENÍ
-- ❌ Opravdové zavěšení (kola jsou tuze přibita, `SuspensionKind::Rigid`) → **krok B**
+- ❌ Zavěšení pro `.veh` auta (zatím `Rigid` + placeholder světlost) → **krok B, pokračování**
 - ❌ Terén (jen placatá rovina) → **krok D**
 - ❌ Doladěný tire model (hodnoty se ladí)
-- ❌ Real OSM lokace, build system, rally checkpointy, multiplayer
+- ❌ Skutečná spojka (rozjezd řeší zjednodušená trakční kontrola)
+- ❌ Real OSM lokace, plný build system, rally checkpointy, multiplayer
 
 ---
 
@@ -156,8 +163,10 @@ src/
 ### Fáze 2 — Fyzika (PRÁVĚ TEĎ)
 Pořadí dalších kroků:
 - **A) Rozjet `.veh` auto** — ✅ hotovo (kola napojená na hub-nody, `ChassisFrame` z pozic nodů).
-- **B) Opravdové zavěšení** — `SuspensionKind` dál než `Rigid` (McPherson / wishbone se zdvihem). ← **další na řadě**
-- **C) Drivetrain** — ✅ hotovo (motor s momentovou křivkou + převodovka + diff/AWD).
+- **B) Opravdové zavěšení** — část 1 ✅ (test auto: `Coil` se zdvihem, stabilizátor,
+  build menu). ← **pokračování na řadě:** zavěšení pro `.veh` auta, McPherson/wishbone geometrie.
+- **C) Drivetrain** — ✅ hotovo (motor s momentovou křivkou + převodovka + diff/AWD);
+  zbývá skutečná spojka (rozjezd zatím řeší zjednodušená trakční kontrola).
 - **D) Terén** — `World` trait, heightfield kolize, weight transfer na svazích.
 - Průběžně: **ladění tire modelu** (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
@@ -166,6 +175,8 @@ Pořadí dalších kroků:
 
 ### Fáze 4 — Build system
 - Part inventory, assembly UI (My Summer Car styl), kompatibilita, tuning (Automation styl)
+- První kousek už žije: `CarBuild` resource + výběr zavěšení v menu (vzor: díl = data,
+  resource drží volbu, builder čte — stejně jako `Drivetrain`)
 
 ### Fáze 5 — Game modes
 - Freeroam, rally checkpointy + timer, ghost replay

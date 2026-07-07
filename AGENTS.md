@@ -67,7 +67,7 @@ modulu (`solver.rs` / `vehicle.rs`). Při větší úpravě fyziky to zvaž.
 ## Build / běh
 
 ```bash
-cargo run --release   # fyzika je náročná (Fabia ~stovky substepů/snímek) → release!
+cargo run --release   # fyzika je náročná (velké .veh = stovky substepů/snímek) → release!
 cargo check           # rychlá kontrola, že se to přeloží
 ```
 
@@ -75,9 +75,12 @@ cargo check           # rychlá kontrola, že se to přeloží
 
 **Fáze 2 — Fyzika.** Hotovo: vlastní node-beam solver (nahradil rapier soft-body),
 jednotný model aut na solveru, tire model (Pacejka podélně i bočně, friction circle,
-dynamika spinu), chase/FPV kamera. **SE LADÍ:** hodnoty tire modelu (Pacejka `b/c/e`,
-`MU`, grip, `V_LOW`) — ještě není doladěné.
+dynamika spinu), chase/FPV kamera, **A)** `.veh` auto jezdí, **C)** drivetrain
+(motor + převodovka + diff/AWD), **B část 1)** zavěšení `Coil` se zdvihem u test auta
+(2 tuhá ~vodorovná ramena + ~svislá pružina s tlumičem — trik geometrie, solver netknutý),
+stabilizátor jako V-nod, trakční kontrola rozjezdu, build menu (`CarBuild`: výběr Rigid/Coil).
+**SE LADÍ:** hodnoty tire modelu (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
-Další (pořadí): **A)** rozjet `.veh` auto (kola + chassis rám z `.veh`) → **B)** opravdové
-zavěšení (`SuspensionKind` dál než `Rigid`) → **C)** drivetrain (motor + převodovka) →
-**D)** terén. Ladění tire modelu běží průběžně.
+Další (pořadí): **B pokračování)** zavěšení pro `.veh` auta (zatím `Rigid`
++ placeholder světlost), McPherson/wishbone geometrie → **C')** skutečná spojka místo
+TC hacku, `.veh parts` (radius/hmota kol z dat) → **D)** terén. Ladění tire modelu průběžně.
