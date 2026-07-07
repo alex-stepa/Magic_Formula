@@ -153,6 +153,8 @@ src/
   → celá tuhost nese váhu; reálnější geometrie než Coil do rohu rámu
 - [x] Double wishbone: kolo = hub + top nod (těhlice), SLA ramena (krátké nahoře, dlouhé
   dole) → skutečný camber při propružení; disk se naklání podle vektoru hub→top
+- [x] Camber thrust v tire modelu: nakloněné kolo (s těhlicí) táhne do strany náklonu
+  (`CAMBER_THRUST·Fz·sin γ`, před kruhem adheze) — SLA v zatáčce pomáhá zatáčet
 - [x] Spojka (levý Shift) + motor jako stav: RPM se integruje (setrvačnost), spojka =
   viskózní vazba s kapacitou; na kola jde jen to, co spojka přenese. Clear → Backspace
 
