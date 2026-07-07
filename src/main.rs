@@ -266,8 +266,9 @@ const V_LOW: f32 = 2.0;
 const SUSP_ARM_K: f32 = 150_000.0;
 const SUSP_COIL_K: f32 = 100_000.0;
 // Násobek tlumení coil beamu: globální DAMPING_RATIO 0.25 je proti zvonění rámu,
-// skutečný tlumič zavěšení má ζ ≈ 0.6 — dopad má sežrat tlumič, ne konec zdvihu.
-const COIL_DAMP_MULT: f32 = 2.5;
+// skutečný tlumič zavěšení má ζ ≈ 0.6–0.9 — dopad i kolébání má sežrat tlumič.
+// ponytail: kolébání v zatáčce pořádně vyřeší až stabilizátor (anti-roll bar), přijde dál.
+const COIL_DAMP_MULT: f32 = 3.5;
 
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
 // Solver o typu neví.
@@ -739,7 +740,9 @@ fn spawn_solver_car(
     // Sdílená značka u ráfku — kontrastní kostička, ať je vidět otáčení kola.
     let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
     let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
-    let (wx, wy, wz) = (0.85, -0.15, 1.4);
+    // wx: kolo (r 0.34, šířka 0.22) se při plném rejdu 28° natočí ~0.26 m do stran —
+    // rozchod 1.0 ho drží mimo kvádr těla (hx 0.7); širší rozchod = i menší kolébání.
+    let (wx, wy, wz) = (1.0, -0.15, 1.4);
     // (sx, sz, steered) — front/řízení; KTERÁ kola táhnou rozhoduje DriveLayout, ne builder.
     let wheel_layout = [
         (-1.0_f32, 1.0_f32, true),  // FL: přední, řízené
