@@ -220,6 +220,7 @@ struct BeamC {
 // které postaví builder zavěšení (viz SuspensionKind) → různé geometrie bez zásahu do solveru.
 struct WheelC {
     hub: usize,        // index hub-nodu v SoftBody (na něm visí pérovací beamy do těla)
+    top: Option<usize>, // top nod těhlice (DoubleWishbone): hub→top = osa kola → camber v renderu; None = kolo vzpřímené s rámem
     render: Entity,    // entita disku kola (zápis Transformu: pozice hubu + spin + steer)
     radius: f32,
     spin: f32,         // úhel natočení kola (rad) — pro render
@@ -279,6 +280,14 @@ const SUSP_STRUT_K: f32 = 80_000.0;
 const STRUT_TOWER_K: f32 = 200_000.0; // věž = pevná část rámu (4 tuhé beamy do rohů)
 const STRUT_TOWER_UP: f32 = 0.75; // věž nad hubem (délka vzpěry = rezerva do překlopení)
 const STRUT_TOWER_IN: f32 = 0.15; // věž kousek dovnitř → vzpěra šikmá jako v reálu
+// --- Double wishbone ---
+// Kolo = hub + TOP nod (těhlice). Dolní ramena na hub (dlouhá, do protějších rohů),
+// horní A-rameno na top (krátké, do rohů STEJNÉ strany) = SLA geometrie: při propružení
+// opisuje top menší oblouk než hub → kolo mění odklon (camber). Orientaci disku dává
+// vektor hub→top (softbody_to_transforms), solver o camberu nic neví.
+const KNUCKLE_H: f32 = 0.55; // top nod nad hubem — vyjde ve výšce horních rohů (ramena ~vodorovná)
+const KNUCKLE_K: f32 = 150_000.0; // těhlice hub↔top = tuhá ocel (definuje rovinu kola)
+const SUSP_DW_SPRING_K: f32 = 100_000.0; // pružina šikmo do rohu jako Coil (~0.55·k svisle)
 
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
 // Solver o typu neví.
@@ -293,7 +302,10 @@ enum SuspensionKind {
     // Jako Coil, ale pružina+tlumič = VZPĚRA na věž nad kolem (~svislá, viz STRUT_TOWER_*).
     // Věž staví builder v spawn_solver_car; build_suspension jen dostane její index v anchors[2].
     McPherson { arm_k: f32, strut_k: f32 },
-    // DoubleWishbone { ... }, LeafSpring { ... } — časem
+    // Dvě roviny ramen + těhlice (top nod nad hubem): dolní ramena na hub, horní na top,
+    // pružina na hub. Kolo má orientaci z hub→top = skutečný camber (viz KNUCKLE_*).
+    DoubleWishbone { arm_k: f32, spring_k: f32 },
+    // LeafSpring { ... } — časem
 }
 
 impl SuspensionKind {
@@ -301,11 +313,13 @@ impl SuspensionKind {
     const RIGID: Self = Self::Rigid;
     const COIL: Self = Self::Coil { arm_k: SUSP_ARM_K, coil_k: SUSP_COIL_K };
     const MCPHERSON: Self = Self::McPherson { arm_k: SUSP_ARM_K, strut_k: SUSP_STRUT_K };
+    const DOUBLE_WISHBONE: Self = Self::DoubleWishbone { arm_k: SUSP_ARM_K, spring_k: SUSP_DW_SPRING_K };
     fn label(self) -> &'static str {
         match self {
             Self::Rigid => "Rigid (tuhé)",
             Self::Coil { .. } => "Coil (zdvih)",
             Self::McPherson { .. } => "McPherson (vzpěra)",
+            Self::DoubleWishbone { .. } => "Double wishbone (camber)",
         }
     }
 }
@@ -560,6 +574,7 @@ fn spawn_ui(commands: &mut Commands) {
                 spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::RIGID.label()), SpawnAction::SetSuspension(SuspensionKind::RIGID));
                 spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::COIL.label()), SpawnAction::SetSuspension(SuspensionKind::COIL));
                 spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::MCPHERSON.label()), SpawnAction::SetSuspension(SuspensionKind::MCPHERSON));
+                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::DOUBLE_WISHBONE.label()), SpawnAction::SetSuspension(SuspensionKind::DOUBLE_WISHBONE));
                 for (i, path) in available_vehs().iter().enumerate() {
                     let file = path.file_name().unwrap().to_string_lossy();
                     let label = format!("{} — Soft-body: {file}", i + 2);
@@ -693,7 +708,7 @@ fn spawn_shortcuts(
 
 // Postaví zavěšení = beamy mezi hubem kola a tělem. JAK je propojí, závisí na typu.
 // Solver o typu neví — tady se „vlévá" celá variabilita podvozku (custom suspension).
-fn build_suspension(sb: &mut SoftBody, hub: usize, anchors: &[usize], kind: SuspensionKind) {
+fn build_suspension(sb: &mut SoftBody, hub: usize, top: Option<usize>, anchors: &[usize], kind: SuspensionKind) {
     match kind {
         // Rigid = hub tuze připojen ke všem předaným úchytům → kolo drží napevno (žádný zdvih).
         SuspensionKind::Rigid => {
@@ -714,6 +729,19 @@ fn build_suspension(sb: &mut SoftBody, hub: usize, anchors: &[usize], kind: Susp
             sb.add_beam(hub, anchors[2], coil_k);
             // Tlumič sedí na pružině: zesil d posledního beamu (builder-side, solver netknutý).
             sb.beams.last_mut().unwrap().d *= COIL_DAMP_MULT;
+        }
+        // Double wishbone čeká anchors = [.., .., pružina, horní A přední, horní A zadní]
+        // a top = těhlice (staví ji spawn_solver_car). Dolní ramena dlouhá (protější rohy),
+        // horní krátká (rohy stejné strany) = SLA → camber při propružení.
+        SuspensionKind::DoubleWishbone { arm_k, spring_k } => {
+            let top = top.expect("DoubleWishbone potřebuje top nod (těhlici)");
+            sb.add_beam(hub, anchors[0], arm_k); // dolní příčné rameno
+            sb.add_beam(hub, anchors[1], arm_k); // dolní podélné rameno
+            sb.add_beam(top, anchors[3], arm_k); // horní A-rameno, přední úchyt
+            sb.add_beam(top, anchors[4], arm_k); // horní A-rameno, zadní úchyt
+            sb.add_beam(hub, top, KNUCKLE_K);    // těhlice (tuhá — drží rovinu kola)
+            sb.add_beam(hub, anchors[2], spring_k);
+            sb.beams.last_mut().unwrap().d *= COIL_DAMP_MULT; // tlumič na pružině
         }
     }
 }
@@ -863,10 +891,28 @@ fn spawn_solver_car(
         } else {
             body[xi + 2 + zi] // horní roh stejné strany, stejné z
         };
+        // Těhlice (jen DoubleWishbone): top nod nad hubem — na něm visí horní A-rameno
+        // a jeho poloha vůči hubu dává disku odklon (camber) v renderu.
+        let knuckle = if let SuspensionKind::DoubleWishbone { .. } = build.suspension {
+            let kp = hub_pos + Vec3::Y * KNUCKLE_H;
+            let ke = commands
+                .spawn((
+                    Mesh3d(node_mesh.clone()),
+                    MeshMaterial3d(node_material.clone()),
+                    Transform::from_translation(kp),
+                    Spawned,
+                ))
+                .id();
+            Some(sb.add_node(kp, 10.0, ke))
+        } else {
+            None
+        };
         let anchors = [
-            body[(4 - xi) + zi], // spodní roh PROTĚJŠÍ strany, stejné z → příčné rameno (drží bok)
-            body[xi + 1 - zi],   // spodní roh stejné strany, OPAČNÉ z → podélné rameno (drží tah/brzdu)
-            top,                 // pružina/vzpěra (nese váhu)
+            body[(4 - xi) + zi],     // spodní roh PROTĚJŠÍ strany, stejné z → příčné rameno (drží bok)
+            body[xi + 1 - zi],       // spodní roh stejné strany, OPAČNÉ z → podélné rameno (drží tah/brzdu)
+            top,                     // pružina/vzpěra (nese váhu)
+            body[xi + 2 + zi],       // horní roh stejné strany, stejné z → horní A-rameno (jen DW, krátké)
+            body[xi + 3 - zi],       // horní roh stejné strany, opačné z → horní A-rameno (jen DW)
         ];
         // Rigid potřebuje VŠECH 8 nodů (šikmé beamy do všech směrů = tuhý zámek);
         // se 3 skoro-vodorovnými úchyty by svisle skoro nedržel a houpal se.
@@ -874,7 +920,7 @@ fn spawn_solver_car(
             SuspensionKind::Rigid => &body,
             _ => &anchors,
         };
-        build_suspension(sb, hub, rigid_anchors, build.suspension);
+        build_suspension(sb, hub, knuckle, rigid_anchors, build.suspension);
 
         let render = commands
             .spawn((
@@ -895,6 +941,7 @@ fn spawn_solver_car(
             .id();
         sb.wheels.push(WheelC {
             hub,
+            top: knuckle,
             render,
             radius: wheel_radius,
             spin: 0.0,
@@ -1073,10 +1120,11 @@ fn spawn_softbody(
         // Hub = nový node; jeho render entita = disk kola (softbody_to_transforms mu
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
         let hub = sb.add_node(hub_pos, hub_mass, render);
-        build_suspension(sb, hub, anchors, SuspensionKind::Rigid); // přitáhni hub na suspension nody
+        build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid); // přitáhni hub na suspension nody
         hub_idxs.push(hub);
         sb.wheels.push(WheelC {
             hub,
+            top: None, // .veh zavěšení zatím Rigid — kolo vzpřímené s rámem
             render,
             radius: wheel_radius,
             spin: 0.0,
@@ -1389,13 +1437,28 @@ fn softbody_to_transforms(
         }
     }
 
-    // Kola → disky: pozice = hub, rotace = orientace auta · řízení(Y) · valení(X) · base(válec Y→osa X).
+    // Kola → disky: pozice = hub, rotace = orientace kola · řízení(Y) · valení(X) · base(válec Y→osa X).
     let base = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
     for wheel in &sb.wheels {
         if let Ok(mut tf) = transforms.get_mut(wheel.render) {
             tf.translation = sb.pos[wheel.hub];
+            // S těhlicí (top nod) je „up" kola skutečný vektor hub→top → disk se naklání
+            // s těhlicí = camber. Forward se bere z rámu auta a re-ortogonalizuje. Bez
+            // těhlice kolo vzpřímené s rámem (Rigid/Coil/McPherson — hub je bod).
+            let wheel_rot = match wheel.top {
+                Some(t) => {
+                    let up = (sb.pos[t] - sb.pos[wheel.hub]).normalize_or_zero();
+                    let right = up.cross(car_rot * Vec3::Z).normalize_or_zero();
+                    if right == Vec3::ZERO {
+                        car_rot // zdegenerované (top≈hub nebo up ∥ forward)
+                    } else {
+                        Quat::from_mat3(&Mat3::from_cols(right, up, right.cross(up)))
+                    }
+                }
+                None => car_rot,
+            };
             tf.rotation =
-                car_rot * Quat::from_rotation_y(wheel.steer) * Quat::from_rotation_x(wheel.spin) * base;
+                wheel_rot * Quat::from_rotation_y(wheel.steer) * Quat::from_rotation_x(wheel.spin) * base;
         }
     }
 }
