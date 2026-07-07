@@ -79,7 +79,8 @@ dynamika spinu), chase/FPV kamera, **A)** `.veh` auto jezdí, **C)** drivetrain
 (motor + převodovka + diff/AWD), **B část 1)** zavěšení `Coil` se zdvihem u test auta
 (2 tuhá ~vodorovná ramena + ~svislá pružina s tlumičem — trik geometrie, solver netknutý),
 stabilizátor jako V-nod, trakční kontrola rozjezdu, build menu (`CarBuild`: výběr
-Rigid/Coil/McPherson — McPherson = vzpěra na věž nad hubem, vzor ARB V-nod),
+Rigid/Coil/McPherson/DoubleWishbone — McPherson = vzpěra na věž nad hubem; DW = těhlice
+(top nod) + SLA ramena → skutečný camber, disk se naklání podle hub→top),
 spojka (levý Shift; motor = integrovaný stav, viskózní vazba s kapacitou, Clear na Backspace).
 **SE LADÍ:** hodnoty tire modelu (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
