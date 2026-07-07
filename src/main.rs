@@ -401,8 +401,11 @@ const CLUTCH_CAP: f32 = 300.0;  // Nm na straně motoru
 // spojka proti stojícím kolům ho přetlačí (rovnováha ~360 rpm < STALL_RPM) a motor
 // CHCÍPNE; rozjezd bez plynu tedy chce cit v noze jako ve skutečném autě.
 const IDLE_GAIN: f32 = 1.5; // Nm / (rad/s) deficitu
-// Pod tyhle otáčky motor chcípne (stalled). Start zpět: klávesa R.
+// Pod tyhle otáčky motor chcípne (stalled). Start zpět: klávesa R (+ Shift, ať znovu nechcípne).
 const STALL_RPM: f32 = 400.0;
+// Vnitřní tření motoru (Nm na rad/s): chcíplý motor dotočí do nuly a při puštěném
+// plynu brzdí přes převod (brzdění motorem). Bez něj otáčky mrtvého motoru zamrznou.
+const ENGINE_FRICTION: f32 = 0.05;
 
 impl Default for Drivetrain {
     fn default() -> Self {
@@ -1396,6 +1399,13 @@ fn vehicle_drive(
     let clutch_rate = 4.0 * time.delta_secs();
     dt.clutch += (clutch_target - dt.clutch).clamp(-clutch_rate, clutch_rate);
 
+    // Starter: R nahodí chcíplý motor na volnoběh. MUSÍ být před čtením omega_e —
+    // jinak integrace níž jede ze starých otáček a motor hned zase chcípne.
+    if dt.stalled && keys.just_pressed(KeyCode::KeyR) {
+        dt.stalled = false;
+        dt.rpm = dt.engine.idle_rpm;
+    }
+
     // Převod aktuálního kvaltu (R = opačný směr). Neutrál → 0 (motor točí, kola ne).
     let ratio = match dt.gear {
         0 => 0.0,
@@ -1423,26 +1433,24 @@ fn vehicle_drive(
         0.0
     };
 
-    // Starter: R nahodí chcíplý motor na volnoběh (lazy starter, bez protáčení).
-    if dt.stalled && keys.just_pressed(KeyCode::KeyR) {
-        dt.stalled = false;
-        dt.rpm = dt.engine.idle_rpm;
-    }
-
-    // Motor jako stav: plyn ho roztáčí, spojka brzdí proti kolům, regulátor volnoběhu
-    // dotláčí k idle (slabě — jde přetlačit a motor chcípne). Rev limiter v engine_torque.
+    // Motor jako stav: plyn ho roztáčí, spojka brzdí proti kolům, vnitřní tření ho
+    // stahuje k nule, regulátor volnoběhu dotláčí k idle (slabě — jde přetlačit
+    // a motor chcípne). Rev limiter v engine_torque.
     let idle_omega = dt.engine.idle_rpm * std::f32::consts::TAU / 60.0;
     let (t_engine, t_idle) = if dt.stalled {
-        (0.0, 0.0) // chcíplý motor nedává nic, spojka ho jen dotáčí k nule
+        (0.0, 0.0) // chcíplý motor nedává nic, jen tření a spojka
     } else {
         (
             engine_torque(dt.rpm, &dt.engine) * throttle,
             IDLE_GAIN * (idle_omega - omega_e).max(0.0),
         )
     };
-    let omega_new = (omega_e + (t_engine + t_idle - t_clutch) / ENGINE_INERTIA * time.delta_secs()).max(0.0);
-    if !dt.stalled && omega_new < STALL_RPM * std::f32::consts::TAU / 60.0 {
-        dt.stalled = true; // zátěž stáhla otáčky pod práh → chcíplo (start: R)
+    let t_net = t_engine + t_idle - t_clutch - ENGINE_FRICTION * omega_e;
+    let omega_new = (omega_e + t_net / ENGINE_INERTIA * time.delta_secs()).max(0.0);
+    if dt.stalled && dt.clutch > 0.5 && omega_new > idle_omega {
+        dt.stalled = false; // roztlačení: kola protočila mrtvý motor nad volnoběh → chytl
+    } else if !dt.stalled && omega_new < STALL_RPM * std::f32::consts::TAU / 60.0 {
+        dt.stalled = true; // zátěž stáhla otáčky pod práh → chcíplo (start: Shift+R)
     }
     dt.rpm = omega_new * 60.0 / std::f32::consts::TAU;
 
@@ -1544,7 +1552,7 @@ fn update_hud(dt: Res<Drivetrain>, mut hud: Query<&mut Text, With<HudText>>) {
     };
     let diff = if dt.rear_diff.lock > 0.5 { "ZAMČENÝ" } else { "otevřený" };
     let clutch = if dt.stalled {
-        "  CHCÍPLO (R)"
+        "  CHCÍPLO (Shift+R)"
     } else if dt.clutch < 0.95 {
         "  SPOJKA"
     } else {
