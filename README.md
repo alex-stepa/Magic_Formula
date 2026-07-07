@@ -4,19 +4,19 @@ Rally + freeroam hra s modulární car fyzikální architekturou inspirovanou Be
 Vlastní formát, vlastní implementace, vlastní identita. Potenciálně Steam release.
 
 - **Název:** Magic Formula
-- **Repozitáře:** `magic-formula` (hra) + `jbeam-rs` (konvertor)
+- **Části:** `magic-formula` (hra) + `tools/jbeam-rs` (lokální konvertor, mimo git)
 
 ---
 
-## Dva repozitáře
+## Části projektu
 
-### 1. `jbeam-rs` — standalone konvertor
-Parsuje BeamNG `.jbeam` soubory a konvertuje je do vlastního `.veh` formátu.
-Oddělený od hry, není součástí buildu.
-
-### 2. `magic-formula` — hlavní hra
+### 1. `magic-formula` — hlavní hra
 Rust + Bevy, vlastní `.veh` formát, node-beam fyzika na **vlastním solveru**
 (rapier zůstal jen pro statický svět/zem).
+
+### 2. `tools/jbeam-rs` — lokální konvertor
+Parsuje BeamNG `.jbeam` soubory a konvertuje je do vlastního `.veh` formátu.
+Samostatný crate, **není součástí buildu hry ani gitu** (gitignored) — drží se jen lokálně.
 
 ---
 
@@ -102,7 +102,7 @@ struct SoftBody {
 ```rust
 struct BeamC { i: usize, j: usize, rest: f32, k: f32, d: f32 }
 struct WheelC { hub: usize, radius: f32, spin: f32, spin_vel: f32, steer: f32,
-                drive_torque: f32, brake: f32, driven: bool, steered: bool, tire: TireParams }
+                drive_torque: f32, brake: f32, front: bool, steered: bool, tire: TireParams }
 struct TireParams { normal_stiffness: f32, normal_damping: f32, long: Pacejka, lat: Pacejka }
 struct Pacejka { b: f32, c: f32, e: f32 } // Magic Formula koeficienty
 enum SuspensionKind { Rigid /* McPherson, DoubleWishbone, LeafSpring… */ }
@@ -129,7 +129,7 @@ src/
 - [x] Parsování `.jbeam` (vlastní preprocess — jbeam má chybějící čárky, není čistý json5)
 - [x] Konverze nodes, beams, **wheels**, triangles do `.veh`
 - [x] CLI: `jbeam-rs input.jbeam -o output.veh`
-- [x] Test na Škoda Fabia (`assets/fabia.veh`: 500 nodů, 5871 beamů, 4 kola, 791 triangů)
+- [x] Test na Škoda Fabia (500 nodů, 5871 beamů, 4 kola, 791 triangů; `.veh` assety se v repu nedrží)
 
 ### `magic-formula`
 - [x] Bevy setup, okno, kamera, světlo, placatá zem
@@ -139,12 +139,12 @@ src/
 - [x] Tire model: Pacejka podélně i bočně, friction circle, dynamika spinu
 - [x] Pohon / brzda / plynulé řízení (vstup zapisuje záměr, sílu řeší solver)
 - [x] Chase + FPV kamera (přepínání klávesou C)
-- [x] Spawn menu UI (klávesy 1/2/3, Shift+C = clear)
+- [x] Spawn menu UI („Testovací vůz" + případné `.veh`, Shift+C = clear)
+- [x] Řiditelný vůz na solveru: kola napojená na hub-nody + `ChassisFrame` z pozic nodů → **krok A**
+- [x] Drivetrain: motor (momentová křivka, RPM) + převodovka + diff/AWD → **krok C**
 
 ### Zatím NENÍ
-- ❌ Řiditelné `.veh` auto (Fabia se načte jako blob — kola/chassis se ještě nenapojují) → **krok A**
-- ❌ Opravdové zavěšení (kola jsou tuze přibita) → **krok B**
-- ❌ Drivetrain (motor s křivkou + převodovka; teď placatý moment) → **krok C**
+- ❌ Opravdové zavěšení (kola jsou tuze přibita, `SuspensionKind::Rigid`) → **krok B**
 - ❌ Terén (jen placatá rovina) → **krok D**
 - ❌ Doladěný tire model (hodnoty se ladí)
 - ❌ Real OSM lokace, build system, rally checkpointy, multiplayer
@@ -155,10 +155,9 @@ src/
 
 ### Fáze 2 — Fyzika (PRÁVĚ TEĎ)
 Pořadí dalších kroků:
-- **A) Rozjet `.veh` auto** — napojit kola (`wheels` sekce) na hub-nody, odvodit `ChassisFrame`
-  z pozic nodů, postavit zavěšení → řídí se skutečná Fabia, ne hardcoded kvádr.
-- **B) Opravdové zavěšení** — `SuspensionKind` dál než `Rigid` (McPherson / wishbone se zdvihem).
-- **C) Drivetrain** — motor (momentová křivka, RPM) + převodovka (ratios, final drive).
+- **A) Rozjet `.veh` auto** — ✅ hotovo (kola napojená na hub-nody, `ChassisFrame` z pozic nodů).
+- **B) Opravdové zavěšení** — `SuspensionKind` dál než `Rigid` (McPherson / wishbone se zdvihem). ← **další na řadě**
+- **C) Drivetrain** — ✅ hotovo (motor s momentovou křivkou + převodovka + diff/AWD).
 - **D) Terén** — `World` trait, heightfield kolize, weight transfer na svazích.
 - Průběžně: **ladění tire modelu** (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
