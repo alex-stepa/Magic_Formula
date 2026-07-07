@@ -116,12 +116,12 @@ struct CarBuild { suspension: SuspensionKind } // resource: vybrané díly (buil
 
 ```
 src/
-├── main.rs    ← App setup, solver, tire model, builder aut, UI, kamera (zatím vše tady)
+├── main.rs    ← App setup, UI/menu, HUD, kamera, render sync
+├── solver.rs  ← jádro fyziky: SoftBody (SoA), node-beam solver, tire model
+├── vehicle.rs ← auto: zavěšení + buildery, drivetrain, ovládání
 ├── physics.rs ← jen statický svět (zem) jako impl Bundle pro rapier
 └── veh.rs     ← načtení vlastního .veh (serde)
 ```
-
-**Plán:** `main.rs` rozdělit — solver/tire/vozidlo do vlastního modulu (`solver.rs` / `vehicle.rs`).
 
 ---
 

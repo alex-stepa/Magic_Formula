@@ -35,15 +35,15 @@ Plný kontext, roadmapa a scope: viz [README.md](README.md).
 
 ```
 src/
-├── main.rs    ← App setup, solver, tire model, builder aut, UI, kamera (zatím VŠE tady)
+├── main.rs    ← App setup, UI/menu, HUD, kamera, render sync (transforms + mesh)
+├── solver.rs  ← jádro fyziky: SoftBody (SoA), node-beam solver, tire model (Pacejka)
+├── vehicle.rs ← auto: typy zavěšení + buildery, drivetrain (motor/spojka), ovládání
 ├── physics.rs ← JEN statický svět (zem) jako funkce -> impl Bundle pro rapier
 └── veh.rs     ← načtení vlastního .veh (serde Deserialize)
 jbeam-rs/      ← SAMOSTATNÝ konvertor .jbeam → .veh (vlastní Cargo projekt, není součástí hry)
 ```
 
 Pozn.: dvě `src/` složky jsou záměr — `./src` je hra, `jbeam-rs/src` je konvertor.
-**PLÁN:** `main.rs` je obtloustlý — solver/tire/vozidlo se mají vyčlenit do vlastního
-modulu (`solver.rs` / `vehicle.rs`). Při větší úpravě fyziky to zvaž.
 
 ## Architektura — jak auto reálně funguje
 
