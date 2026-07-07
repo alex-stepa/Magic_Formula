@@ -105,7 +105,7 @@ struct WheelC { hub: usize, radius: f32, spin: f32, spin_vel: f32, steer: f32,
                 drive_torque: f32, brake: f32, front: bool, steered: bool, tire: TireParams }
 struct TireParams { normal_stiffness: f32, normal_damping: f32, long: Pacejka, lat: Pacejka }
 struct Pacejka { b: f32, c: f32, e: f32 } // Magic Formula koeficienty
-enum SuspensionKind { Rigid, Coil { arm_k, coil_k } /* McPherson, DoubleWishbone… */ }
+enum SuspensionKind { Rigid, Coil { arm_k, coil_k }, McPherson { arm_k, strut_k } /* DoubleWishbone… */ }
 struct CarBuild { suspension: SuspensionKind } // resource: vybrané díly (build systém)
 ```
 
@@ -146,8 +146,10 @@ src/
 - [x] Zavěšení se svislým zdvihem (`SuspensionKind::Coil`) u test auta → **krok B, část 1**:
   2 tuhá ~vodorovná ramena (drží kolo v ose) + měkčí ~svislá pružina s tlumičem — trik
   geometrie, solver netknutý. + stabilizátor (V-nod nad osou) + trakční kontrola rozjezdu
-- [x] Build menu (první díl): `CarBuild` resource, výběr zavěšení Rigid/Coil v menu
-  s live zvýrazněním; přepnutí za běhu přestaví stojící auto
+- [x] Build menu (první díl): `CarBuild` resource, výběr zavěšení Rigid/Coil/McPherson
+  v menu s live zvýrazněním; přepnutí za běhu přestaví stojící auto
+- [x] McPherson vzpěra: věž (nod tuze svázaný s rámem) nad hubem, pružina+tlumič ~svislá
+  → celá tuhost nese váhu; reálnější geometrie než Coil do rohu rámu
 - [x] Spojka (levý Shift) + motor jako stav: RPM se integruje (setrvačnost), spojka =
   viskózní vazba s kapacitou; na kola jde jen to, co spojka přenese. Clear → Backspace
 
