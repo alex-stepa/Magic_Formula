@@ -775,7 +775,10 @@ fn spawn_solver_car(
     let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
     // wx: kolo (r 0.34, šířka 0.22) se při plném rejdu 28° natočí ~0.26 m do stran —
     // rozchod 1.0 ho drží mimo kvádr těla (hx 0.7); širší rozchod = i menší kolébání.
-    let (wx, wy, wz) = (1.0, -0.15, 1.4);
+    // wy: kola 0.30 pod středem těla → spodek těla ~28 cm nad zemí (s wy −0.15 škrtal
+    // o zem při zhoupnutí v rozjezdu). Ramena vyjdou v klidu ~vodorovně (střed zdvihu)
+    // a pružina svisleji (víc rezervy do překlopení).
+    let (wx, wy, wz) = (1.0, -0.30, 1.4);
     // (sx, sz, steered) — front/řízení; KTERÁ kola táhnou rozhoduje DriveLayout, ne builder.
     let wheel_layout = [
         (-1.0_f32, 1.0_f32, true),  // FL: přední, řízené
