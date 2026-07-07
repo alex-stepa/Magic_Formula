@@ -271,6 +271,14 @@ const COIL_DAMP_MULT: f32 = 3.5;
 // Stabilizátor (V-nod nad osou): roll napíná ramena V (svislá složka ~0.45 → roll
 // tuhost ~0.2·k na kolo), bounce V-nod jen sveze s koly → žádný odpor. Viz build_antiroll.
 const ARB_K: f32 = 100_000.0;
+// --- McPherson ---
+// Vzpěra jde z hubu na VĚŽ (nový nod nad hubem, tuze svázaný s rámem) → ~11° od svislice,
+// skoro celé k nese váhu (cos²θ ≈ 0.96) → stačí měkčí pružina než Coil (jehož pružina do
+// rohu rámu má jen ~0.55·k svisle). Sag: 2350 N / (0.96·80k) ≈ 3 cm.
+const SUSP_STRUT_K: f32 = 80_000.0;
+const STRUT_TOWER_K: f32 = 200_000.0; // věž = pevná část rámu (4 tuhé beamy do rohů)
+const STRUT_TOWER_UP: f32 = 0.75; // věž nad hubem (délka vzpěry = rezerva do překlopení)
+const STRUT_TOWER_IN: f32 = 0.15; // věž kousek dovnitř → vzpěra šikmá jako v reálu
 
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
 // Solver o typu neví.
@@ -282,17 +290,22 @@ enum SuspensionKind {
     // SVISLÁ pružina nese váhu a pruží. Klidová délka = spawn vzdálenost → auto si po
     // spawnu sedne o sag ≈ váha/k_svislá níž.
     Coil { arm_k: f32, coil_k: f32 },
-    // McPherson { ... }, DoubleWishbone { ... }, LeafSpring { ... } — časem
+    // Jako Coil, ale pružina+tlumič = VZPĚRA na věž nad kolem (~svislá, viz STRUT_TOWER_*).
+    // Věž staví builder v spawn_solver_car; build_suspension jen dostane její index v anchors[2].
+    McPherson { arm_k: f32, strut_k: f32 },
+    // DoubleWishbone { ... }, LeafSpring { ... } — časem
 }
 
 impl SuspensionKind {
     // Presety pro build menu (výběr „dílu" bez ladicích čísel v UI).
     const RIGID: Self = Self::Rigid;
     const COIL: Self = Self::Coil { arm_k: SUSP_ARM_K, coil_k: SUSP_COIL_K };
+    const MCPHERSON: Self = Self::McPherson { arm_k: SUSP_ARM_K, strut_k: SUSP_STRUT_K };
     fn label(self) -> &'static str {
         match self {
             Self::Rigid => "Rigid (tuhé)",
             Self::Coil { .. } => "Coil (zdvih)",
+            Self::McPherson { .. } => "McPherson (vzpěra)",
         }
     }
 }
@@ -546,6 +559,7 @@ fn spawn_ui(commands: &mut Commands) {
                 // Výběr dílu zavěšení (build systém): přepne CarBuild + přestaví stojící auto.
                 spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::RIGID.label()), SpawnAction::SetSuspension(SuspensionKind::RIGID));
                 spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::COIL.label()), SpawnAction::SetSuspension(SuspensionKind::COIL));
+                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::MCPHERSON.label()), SpawnAction::SetSuspension(SuspensionKind::MCPHERSON));
                 for (i, path) in available_vehs().iter().enumerate() {
                     let file = path.file_name().unwrap().to_string_lossy();
                     let label = format!("{} — Soft-body: {file}", i + 2);
@@ -691,7 +705,10 @@ fn build_suspension(sb: &mut SoftBody, hub: usize, anchors: &[usize], kind: Susp
         // Coil čeká anchors = [příčné rameno, podélné rameno, horní úchyt pružiny]
         // (výběr rohů dělá volající — viz spawn_solver_car). Tlumení dopočítá add_beam
         // z DAMPING_RATIO: měkčí k → úměrně menší d, poměrově tlumené stejně.
-        SuspensionKind::Coil { arm_k, coil_k } => {
+        // McPherson = stejná topologie, jen anchors[2] je VĚŽ (staví ji spawn_solver_car)
+        // místo rohu rámu → vzpěra ~svislá, celé strut_k nese váhu.
+        SuspensionKind::Coil { arm_k, coil_k }
+        | SuspensionKind::McPherson { arm_k, strut_k: coil_k } => {
             sb.add_beam(hub, anchors[0], arm_k);
             sb.add_beam(hub, anchors[1], arm_k);
             sb.add_beam(hub, anchors[2], coil_k);
@@ -824,10 +841,32 @@ fn spawn_solver_car(
         // vodorovná), pružina do horního rohu nad kolem (skoro svislá).
         let xi = if sx > 0.0 { 4 } else { 0 };
         let zi = if sz > 0.0 { 1 } else { 0 };
+        // Horní úchyt pružiny: Coil → roh rámu; McPherson → VĚŽ = nový nod nad hubem,
+        // tuze svázaný 4 beamy s rohy (jede s rámem jako pevný úchyt). Vzpěra na věž
+        // vyjde ~11° od svislice → celé strut_k nese váhu (roh rámu dá jen ~0.55·k).
+        let top = if let SuspensionKind::McPherson { .. } = build.suspension {
+            let tp = hub_pos + Vec3::new(-sx * STRUT_TOWER_IN, STRUT_TOWER_UP, 0.0);
+            let te = commands
+                .spawn((
+                    Mesh3d(node_mesh.clone()),
+                    MeshMaterial3d(node_material.clone()),
+                    Transform::from_translation(tp),
+                    Spawned,
+                ))
+                .id();
+            let t = sb.add_node(tp, 8.0, te);
+            sb.add_beam(t, body[xi + 2 + zi], STRUT_TOWER_K);       // horní roh stejné strany, stejné z
+            sb.add_beam(t, body[xi + 3 - zi], STRUT_TOWER_K);       // horní roh stejné strany, opačné z
+            sb.add_beam(t, body[(4 - xi) + 2 + zi], STRUT_TOWER_K); // horní roh protější strany (drží bok)
+            sb.add_beam(t, body[xi + zi], STRUT_TOWER_K);           // spodní roh pod věží (drží svisle)
+            t
+        } else {
+            body[xi + 2 + zi] // horní roh stejné strany, stejné z
+        };
         let anchors = [
             body[(4 - xi) + zi], // spodní roh PROTĚJŠÍ strany, stejné z → příčné rameno (drží bok)
             body[xi + 1 - zi],   // spodní roh stejné strany, OPAČNÉ z → podélné rameno (drží tah/brzdu)
-            body[xi + 2 + zi],   // horní roh stejné strany, stejné z → pružina (nese váhu)
+            top,                 // pružina/vzpěra (nese váhu)
         ];
         // Rigid potřebuje VŠECH 8 nodů (šikmé beamy do všech směrů = tuhý zámek);
         // se 3 skoro-vodorovnými úchyty by svisle skoro nedržel a houpal se.
@@ -869,9 +908,9 @@ fn spawn_solver_car(
         });
     }
 
-    // Stabilizátory předek + zadek (jen Coil — Rigid zdvih nemá, V-nod by tam byl balast).
+    // Stabilizátory předek + zadek (vše se zdvihem — Rigid ho nemá, V-nod by byl balast).
     // Pořadí wheels = wheel_layout: [0] FL, [1] FR, [2] RL, [3] RR.
-    if let SuspensionKind::Coil { .. } = build.suspension {
+    if !matches!(build.suspension, SuspensionKind::Rigid) {
         let (fl, fr) = (sb.wheels[0].hub, sb.wheels[1].hub);
         let (rl, rr) = (sb.wheels[2].hub, sb.wheels[3].hub);
         build_antiroll(commands, sb, &node_mesh, &node_material, fl, fr, body[3], body[7]);
