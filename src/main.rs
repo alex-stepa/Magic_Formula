@@ -683,7 +683,10 @@ fn spawn_solver_car(
     build: &CarBuild,
 ) {
     *sb = SoftBody::default(); // nový spawn = čistý solver
-    let origin = Vec3::new(0.0, 2.0, 0.0);
+    // Nízko nad zemí (kola ~20 cm nad): dopad z 2 m měl víc energie, než Coil sveze —
+    // pružina se překlopila do vodorovna (snap-through) a tělo lehlo na zem.
+    // ponytail: bez bump-stopu; až budou skoky/rampy, přidat dorazy zdvihu do builderu.
+    let origin = Vec3::new(0.0, 0.8, 0.0);
 
     let node_mesh = meshes.add(Sphere::new(0.06));
     let node_material = materials.add(Color::srgb(0.9, 0.3, 0.2));
