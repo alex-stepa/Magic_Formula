@@ -762,7 +762,13 @@ fn spawn_solver_car(
             body[xi + 1 - zi],   // spodní roh stejné strany, OPAČNÉ z → podélné rameno (drží tah/brzdu)
             body[xi + 2 + zi],   // horní roh stejné strany, stejné z → pružina (nese váhu)
         ];
-        build_suspension(sb, hub, &anchors, build.suspension);
+        // Rigid potřebuje VŠECH 8 nodů (šikmé beamy do všech směrů = tuhý zámek);
+        // se 3 skoro-vodorovnými úchyty by svisle skoro nedržel a houpal se.
+        let rigid_anchors: &[usize] = match build.suspension {
+            SuspensionKind::Rigid => &body,
+            _ => &anchors,
+        };
+        build_suspension(sb, hub, rigid_anchors, build.suspension);
 
         let render = commands
             .spawn((
