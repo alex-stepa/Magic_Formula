@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Pokyny pro práci na tomto projektu jsou v [AGENTS.md](AGENTS.md).
+Instructions for working on this project are in [AGENTS.md](AGENTS.md).
 
-**Nejdůležitější:** režim práce je **GUIDE, ne autopilot** — neprogramuj za autora,
-provázej ho po krocích a kód si píše sám. Detaily v AGENTS.md.
+**Most important:** the working mode is **GUIDE, not autopilot** — don't code for the
+author; walk him through step by step and he writes the code himself. Details in AGENTS.md.

@@ -1,89 +1,94 @@
-# AGENTS.md — pokyny pro AI asistenty na projektu Magic Formula
+# AGENTS.md — instructions for AI assistants on the Magic Formula project
 
-## ⚠️ Pravidlo č. 1 — režim práce: GUIDE, ne autopilot
+## ⚠️ Rule #1 — working mode: GUIDE, not autopilot
 
-Autor je 15letý vývojář, který se učí Rust + Bevy a chce **opravdu růst**, ne dostávat
-hotová řešení.
+The author is a 15-year-old developer learning Rust + Bevy who wants to **actually grow**,
+not receive finished solutions.
 
-- **NEPROGRAMUJ za něj.** Říkej mu CO a PROČ udělat, kód píše on sám.
-- Postupuj **po malých krocích** — jeden krok, počkej na „hotovo", pak další.
-- Hotový snippet napiš **jen** když se zasekne na něčem Rust-specifickém, co ještě
-  neviděl (např. nový typ návratové hodnoty, lifetime, trait). Vysvětli ho, ale
-  základní logiku ať dopíše on.
-- Po napsání kód **zkontroluj** a naveď na opravy, neopravuj potichu.
-- Výjimka: čistě „meta" úkoly (dokumentace, README, komentáře, struktura složek)
-  smíš dělat přímo, když o to požádá.
+- **DO NOT code for him.** Tell him WHAT to do and WHY; he writes the code himself.
+- Proceed in **small steps** — one step, wait for "done", then the next.
+- Write a finished snippet **only** when he gets stuck on something Rust-specific he
+  hasn't seen yet (e.g. a new return type, lifetime, trait). Explain it, but let him
+  finish the core logic himself.
+- After he writes code, **review it** and guide him to fixes; don't fix silently.
+- Exception: purely "meta" tasks (documentation, README, comments, folder structure)
+  may be done directly when he asks for it.
 
-## O projektu
+## About the project
 
-Magic Formula = rally + freeroam car physics sim v Rustu, inspirovaný BeamNG.
-Modulární node-beam fyzika na **vlastním solveru**, vlastní `.veh` formát. Cíl: případně Steam.
+Magic Formula = rally + freeroam car physics sim in Rust, inspired by BeamNG.
+Modular node-beam physics on a **custom solver**, custom `.veh` format. Goal: possibly Steam.
 
-Plný kontext, roadmapa a scope: viz [README.md](README.md).
+Full context, roadmap and scope: see [README.md](README.md).
 
 ## Tech stack
 
-| Co | Čím |
+| What | With |
 |---|---|
-| Jazyk | Rust (edition 2024) |
+| Language | Rust (edition 2024) |
 | Engine | Bevy 0.15 |
-| Fyzika **vozidel** | **vlastní node-beam solver** (semi-implicitní Euler + adaptivní substepping) |
-| Fyzika **světa** | bevy_rapier3d 0.28 — **jen statická zem / kolize světa**, NE vozidla |
-| Formát vozidla | vlastní `.veh` (JSON, serde) |
+| **Vehicle** physics | **custom node-beam solver** (semi-implicit Euler + adaptive substepping) |
+| **World** physics | bevy_rapier3d 0.28 — **static ground / world collisions only**, NOT vehicles |
+| Vehicle format | custom `.veh` (JSON, serde) |
 
-## Struktura
+## Structure
 
 ```
 src/
-├── main.rs    ← App setup, UI/menu, HUD, kamera, render sync (transforms + mesh)
-├── solver.rs  ← jádro fyziky: SoftBody (SoA), node-beam solver, tire model (Pacejka)
-├── vehicle.rs ← auto: typy zavěšení + buildery, drivetrain (motor/spojka), ovládání
-├── physics.rs ← JEN statický svět (zem) jako funkce -> impl Bundle pro rapier
-└── veh.rs     ← načtení vlastního .veh (serde Deserialize)
-jbeam-rs/      ← SAMOSTATNÝ konvertor .jbeam → .veh (vlastní Cargo projekt, není součástí hry)
+├── main.rs    ← App setup, UI/menu, HUD, camera, render sync (transforms + mesh)
+├── solver.rs  ← physics core: SoftBody (SoA), node-beam solver, tire model (Pacejka)
+├── vehicle.rs ← the car: suspension types + builders, drivetrain (engine/clutch), controls
+├── physics.rs ← static world (ground) ONLY, as a function -> impl Bundle for rapier
+└── veh.rs     ← loading the custom .veh (serde Deserialize)
+jbeam-rs/      ← SEPARATE .jbeam → .veh converter (own Cargo project, not part of the game)
 ```
 
-Pozn.: dvě `src/` složky jsou záměr — `./src` je hra, `jbeam-rs/src` je konvertor.
+Note: two `src/` folders are intentional — `./src` is the game, `jbeam-rs/src` is the converter.
 
-## Architektura — jak auto reálně funguje
+## Architecture — how the car actually works
 
-- **Fyzikální stav vozidla žije v JEDNOM resource `SoftBody`** (Structure-of-Arrays:
-  `pos`/`vel`/`inv_mass`/`force`/`beams`/`wheels`). Solver je **hloupý integrátor** nad indexy.
-- **Render = entity** per node (kulička) a per kolo (disk) + trup; každý snímek se jim
-  přepíše `Transform` z pozic v solveru.
-- **Variabilita** (custom díly, tuning, typy zavěšení) patří do **builderů při spawnu**,
-  ne do smyčky solveru. Kolo = node + kruhový kontakt; pérování = beamy (`build_suspension`).
-- **SMĚR (cíl):** build/tuning systém půjde k **per-part datové vrstvě / entitám** nad
-  `SoftBody` (parts = engine, gearbox, …). SoA solver je základ, parts se staví nad ním.
+- **The vehicle's physics state lives in ONE resource `SoftBody`** (Structure-of-Arrays:
+  `pos`/`vel`/`inv_mass`/`force`/`beams`/`wheels`). The solver is a **dumb integrator** over indices.
+- **Render = entities** per node (ball) and per wheel (disk) + body; every frame their
+  `Transform` is overwritten from solver positions.
+- **Variability** (custom parts, tuning, suspension types) belongs in **builders at spawn
+  time**, not in the solver loop. Wheel = node + circular contact; springing = beams
+  (`build_suspension`).
+- **DIRECTION (goal):** the build/tuning system moves toward a **per-part data layer /
+  entities** above `SoftBody` (parts = engine, gearbox, …). The SoA solver is the
+  foundation; parts are built on top of it.
 
-## Konvence
+## Conventions
 
-- Komentáře a komunikace **v češtině** (autor tak píše).
-- `Collider::cuboid` bere **poloviční** rozměry (half-extents), ne celé!
-- **Rapier je jen pro statický svět** (zem). Vozidla NIKDY přes rapier — vše na vlastním solveru.
-- **Reálné tuhosti z `.veh`, ŽÁDNÉ škálování** (starý ×0.01/cap hack je pryč). Stabilitu řeší
-  adaptivní substepping (CFL na úrovni uzlu) + tlumení škálované tuhostí (`d=2·ζ·√(k·μ)`).
+- Comments and communication **in Czech** (that's how the author writes).
+- `Collider::cuboid` takes **half** extents, not full!
+- **Rapier is only for the static world** (ground). Vehicles NEVER via rapier — everything
+  on the custom solver.
+- **Real stiffness values from `.veh`, NO scaling** (the old ×0.01/cap hack is gone).
+  Stability is handled by adaptive substepping (per-node CFL) + damping scaled by
+  stiffness (`d=2·ζ·√(k·μ)`).
 
-## Build / běh
+## Build / run
 
 ```bash
-cargo run --release   # fyzika je náročná (velké .veh = stovky substepů/snímek) → release!
-cargo check           # rychlá kontrola, že se to přeloží
+cargo run --release   # physics is heavy (large .veh = hundreds of substeps/frame) → release!
+cargo check           # quick check that it compiles
 ```
 
-## Aktuální fáze
+## Current phase
 
-**Fáze 2 — Fyzika.** Hotovo: vlastní node-beam solver (nahradil rapier soft-body),
-jednotný model aut na solveru, tire model (Pacejka podélně i bočně, friction circle,
-dynamika spinu), chase/FPV kamera, **A)** `.veh` auto jezdí, **C)** drivetrain
-(motor + převodovka + diff/AWD), **B část 1)** zavěšení `Coil` se zdvihem u test auta
-(2 tuhá ~vodorovná ramena + ~svislá pružina s tlumičem — trik geometrie, solver netknutý),
-stabilizátor jako V-nod, trakční kontrola rozjezdu, build menu (`CarBuild`: výběr
-Rigid/Coil/McPherson/DoubleWishbone — McPherson = vzpěra na věž nad hubem; DW = těhlice
-(top nod) + SLA ramena → skutečný camber, disk se naklání podle hub→top),
-spojka (levý Shift; motor = integrovaný stav, viskózní vazba s kapacitou, Clear na Backspace).
-**SE LADÍ:** hodnoty tire modelu (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
+**Phase 2 — Physics.** Done: custom node-beam solver (replaced rapier soft-body),
+unified car model on the solver, tire model (Pacejka longitudinal and lateral, friction
+circle, spin dynamics), chase/FPV camera, **A)** the `.veh` car drives, **C)** drivetrain
+(engine + gearbox + diff/AWD), **B part 1)** `Coil` suspension with travel on the test car
+(2 stiff ~horizontal arms + a ~vertical spring with a damper — geometry trick, solver
+untouched), anti-roll bar as a V-node, launch traction control, build menu (`CarBuild`:
+Rigid/Coil/McPherson/DoubleWishbone — McPherson = strut onto a tower above the hub;
+DW = knuckle (top node) + SLA arms → real camber, the disk tilts along hub→top),
+clutch (left Shift; engine = integrated state, viscous coupling with capacity,
+Clear on Backspace).
+**BEING TUNED:** tire model values (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
-Další (pořadí): **B pokračování)** zavěšení pro `.veh` auta (zatím `Rigid`
-+ placeholder světlost), McPherson/wishbone geometrie → **C')** `.veh parts`
-(radius/hmota kol z dat) → **D)** terén. Ladění tire modelu průběžně.
+Next (in order): **B continuation)** suspension for `.veh` cars (still `Rigid`
++ placeholder ride height) → **C')** `.veh parts`
+(wheel radius/mass from data) → **D)** terrain. Tire model tuning ongoing.
