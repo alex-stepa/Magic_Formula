@@ -267,8 +267,10 @@ const SUSP_ARM_K: f32 = 150_000.0;
 const SUSP_COIL_K: f32 = 100_000.0;
 // Násobek tlumení coil beamu: globální DAMPING_RATIO 0.25 je proti zvonění rámu,
 // skutečný tlumič zavěšení má ζ ≈ 0.6–0.9 — dopad i kolébání má sežrat tlumič.
-// ponytail: kolébání v zatáčce pořádně vyřeší až stabilizátor (anti-roll bar), přijde dál.
 const COIL_DAMP_MULT: f32 = 3.5;
+// Stabilizátor (V-nod nad osou): roll napíná ramena V (svislá složka ~0.45 → roll
+// tuhost ~0.2·k na kolo), bounce V-nod jen sveze s koly → žádný odpor. Viz build_antiroll.
+const ARB_K: f32 = 100_000.0;
 
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
 // Solver o typu neví.
@@ -679,6 +681,37 @@ fn build_suspension(sb: &mut SoftBody, hub: usize, anchors: &[usize], kind: Susp
     }
 }
 
+// Stabilizátor (anti-roll bar) jako V-nod: lehký nod nad středem osy, tuhá ramena
+// na oba huby. Obě kola spolu (bounce) → nod se sveze s nimi, beamy bez napětí,
+// žádný odpor. Kola PROTI sobě (roll) → nod drží střed a ramena se napnou → brání
+// náklonu. Links na horní rohy těla drží nod podélně/příčně (svisle ~vodorovné = nic).
+fn build_antiroll(
+    commands: &mut Commands,
+    sb: &mut SoftBody,
+    mesh: &Handle<Mesh>,
+    material: &Handle<StandardMaterial>,
+    hub_l: usize,
+    hub_r: usize,
+    link_l: usize,
+    link_r: usize,
+) {
+    let apex = (sb.pos[hub_l] + sb.pos[hub_r]) / 2.0 + Vec3::Y * 0.5;
+    let e = commands
+        .spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(apex),
+            Spawned,
+        ))
+        .id();
+    // 12 kg ~ skutečný stabilizátor; lehčí nod = tužší uzel vůči hmotě = víc substepů (CFL).
+    let a = sb.add_node(apex, 12.0, e);
+    sb.add_beam(a, hub_l, ARB_K);
+    sb.add_beam(a, hub_r, ARB_K);
+    sb.add_beam(a, link_l, 30_000.0);
+    sb.add_beam(a, link_r, 30_000.0);
+}
+
 // Spawne JEZDÍCÍ auto na vlastním solveru (jednotný model): tělo = node-beam kvádr,
 // kola = hub-nody zavěšené beamy + render disky. Minimální test rig pro odladění
 // drive/steer/grip (krok 2). Žádný rapier.
@@ -811,6 +844,15 @@ fn spawn_solver_car(
             steered,
             tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
         });
+    }
+
+    // Stabilizátory předek + zadek (jen Coil — Rigid zdvih nemá, V-nod by tam byl balast).
+    // Pořadí wheels = wheel_layout: [0] FL, [1] FR, [2] RL, [3] RR.
+    if let SuspensionKind::Coil { .. } = build.suspension {
+        let (fl, fr) = (sb.wheels[0].hub, sb.wheels[1].hub);
+        let (rl, rr) = (sb.wheels[2].hub, sb.wheels[3].hub);
+        build_antiroll(commands, sb, &node_mesh, &node_material, fl, fr, body[3], body[7]);
+        build_antiroll(commands, sb, &node_mesh, &node_material, rl, rr, body[2], body[6]);
     }
 
     // Viditelný trup: kvádr velikosti rámu. Transform mu přepisuje softbody_to_transforms.
@@ -1338,10 +1380,20 @@ fn vehicle_drive(keys: Res<ButtonInput<KeyCode>>, dt: Res<Drivetrain>, mut sb: R
     let front_n = sb.wheels.iter().filter(|w| w.front).count().max(1) as f32;
     let rear_n = sb.wheels.iter().filter(|w| !w.front).count().max(1) as f32;
 
+    let v = dt.speed_kmh / 3.6; // rychlost auta (m/s) pro odhad skluzu kola
     for wheel in &mut sb.wheels {
         let axle = dt.layout.axle_fraction(wheel.front); // podíl pro osu tohoto kola
         let n = if wheel.front { front_n } else { rear_n };
         wheel.drive_torque = total * axle / n;
+        // „Spojka/trakčka": nad κ ≈ 0.3 stáhni moment úměrně skluzu. Bez toho plný
+        // moment (víc než pneumatika udrží, μFz·r) roztočí kolo do omezovače; za
+        // špičkou Pacejky klesne podélná síla I boční vedení (kruh adheze) → auto
+        // tancuje bokem a nerozjede se. Ustálí se kousek za špičkou (κ ~0.45).
+        // ponytail: TC natvrdo bez vypínače; vypínač až s modelem spojky.
+        let slip = (wheel.spin_vel.abs() * wheel.radius - v).max(0.0) / v.max(V_LOW);
+        if slip > 0.3 {
+            wheel.drive_torque *= 0.3 / slip;
+        }
         wheel.brake = brake; // brzdí všechna kola
     }
 }
