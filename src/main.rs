@@ -259,11 +259,15 @@ const TIRE_LAT: Pacejka = Pacejka { b: 8.0, c: 1.3, e: 0.97 };
 const V_LOW: f32 = 2.0;
 
 // --- LADICÍ HODNOTY ZAVĚŠENÍ (Coil) ---
-// Ramena tuhá jako Rigid (drží kolo v ose), pružina měkká (svislý zdvih). Sag na roh:
-// ~2350 N / (coil_k·cos²θ ≈ 0.47·k) → při 60k ≈ 8 cm. Pod ~40k hub klesne pod spodní
-// rohy rámu (1.75) a ramena se překlopí — neměkčit bez zvednutí hubu.
+// Ramena tuhá jako Rigid (drží kolo v ose), pružina měkčí (svislý zdvih). Sag na roh:
+// ~2350 N / (coil_k·cos²θ ≈ 0.47·k) → při 100k ≈ 5 cm. Zdvih končí ~40 cm níž, kde se
+// pružina překlopí do vodorovna (snap-through) — kapacita ½·k_v·0.4² musí přežít dopad
+// z 2 m (~3.8 kJ na roh); při 100k + tlumiči (COIL_DAMP_MULT) vychází s rezervou.
 const SUSP_ARM_K: f32 = 150_000.0;
-const SUSP_COIL_K: f32 = 60_000.0;
+const SUSP_COIL_K: f32 = 100_000.0;
+// Násobek tlumení coil beamu: globální DAMPING_RATIO 0.25 je proti zvonění rámu,
+// skutečný tlumič zavěšení má ζ ≈ 0.6 — dopad má sežrat tlumič, ne konec zdvihu.
+const COIL_DAMP_MULT: f32 = 2.5;
 
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
 // Solver o typu neví.
@@ -668,6 +672,8 @@ fn build_suspension(sb: &mut SoftBody, hub: usize, anchors: &[usize], kind: Susp
             sb.add_beam(hub, anchors[0], arm_k);
             sb.add_beam(hub, anchors[1], arm_k);
             sb.add_beam(hub, anchors[2], coil_k);
+            // Tlumič sedí na pružině: zesil d posledního beamu (builder-side, solver netknutý).
+            sb.beams.last_mut().unwrap().d *= COIL_DAMP_MULT;
         }
     }
 }
@@ -683,10 +689,9 @@ fn spawn_solver_car(
     build: &CarBuild,
 ) {
     *sb = SoftBody::default(); // nový spawn = čistý solver
-    // Nízko nad zemí (kola ~20 cm nad): dopad z 2 m měl víc energie, než Coil sveze —
-    // pružina se překlopila do vodorovna (snap-through) a tělo lehlo na zem.
-    // ponytail: bez bump-stopu; až budou skoky/rampy, přidat dorazy zdvihu do builderu.
-    let origin = Vec3::new(0.0, 0.8, 0.0);
+    // Spawn z 2 m = drop test zavěšení při každém spawnu (Coil ho musí ustát:
+    // tužší pružina + tlumič, viz SUSP_COIL_K / COIL_DAMP_MULT).
+    let origin = Vec3::new(0.0, 2.0, 0.0);
 
     let node_mesh = meshes.add(Sphere::new(0.06));
     let node_material = materials.add(Color::srgb(0.9, 0.3, 0.2));
