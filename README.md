@@ -148,12 +148,13 @@ src/
   geometrie, solver netknutý. + stabilizátor (V-nod nad osou) + trakční kontrola rozjezdu
 - [x] Build menu (první díl): `CarBuild` resource, výběr zavěšení Rigid/Coil v menu
   s live zvýrazněním; přepnutí za běhu přestaví stojící auto
+- [x] Spojka (levý Shift) + motor jako stav: RPM se integruje (setrvačnost), spojka =
+  viskózní vazba s kapacitou; na kola jde jen to, co spojka přenese. Clear → Backspace
 
 ### Zatím NENÍ
 - ❌ Zavěšení pro `.veh` auta (zatím `Rigid` + placeholder světlost) → **krok B, pokračování**
 - ❌ Terén (jen placatá rovina) → **krok D**
 - ❌ Doladěný tire model (hodnoty se ladí)
-- ❌ Skutečná spojka (rozjezd řeší zjednodušená trakční kontrola)
 - ❌ Real OSM lokace, plný build system, rally checkpointy, multiplayer
 
 ---
@@ -165,8 +166,8 @@ Pořadí dalších kroků:
 - **A) Rozjet `.veh` auto** — ✅ hotovo (kola napojená na hub-nody, `ChassisFrame` z pozic nodů).
 - **B) Opravdové zavěšení** — část 1 ✅ (test auto: `Coil` se zdvihem, stabilizátor,
   build menu). ← **pokračování na řadě:** zavěšení pro `.veh` auta, McPherson/wishbone geometrie.
-- **C) Drivetrain** — ✅ hotovo (motor s momentovou křivkou + převodovka + diff/AWD);
-  zbývá skutečná spojka (rozjezd zatím řeší zjednodušená trakční kontrola).
+- **C) Drivetrain** — ✅ hotovo (motor s momentovou křivkou + převodovka + diff/AWD
+  + spojka na levý Shift, motor jako integrovaný stav).
 - **D) Terén** — `World` trait, heightfield kolize, weight transfer na svazích.
 - Průběžně: **ladění tire modelu** (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 

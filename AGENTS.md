@@ -78,9 +78,10 @@ jednotný model aut na solveru, tire model (Pacejka podélně i bočně, frictio
 dynamika spinu), chase/FPV kamera, **A)** `.veh` auto jezdí, **C)** drivetrain
 (motor + převodovka + diff/AWD), **B část 1)** zavěšení `Coil` se zdvihem u test auta
 (2 tuhá ~vodorovná ramena + ~svislá pružina s tlumičem — trik geometrie, solver netknutý),
-stabilizátor jako V-nod, trakční kontrola rozjezdu, build menu (`CarBuild`: výběr Rigid/Coil).
+stabilizátor jako V-nod, trakční kontrola rozjezdu, build menu (`CarBuild`: výběr Rigid/Coil),
+spojka (levý Shift; motor = integrovaný stav, viskózní vazba s kapacitou, Clear na Backspace).
 **SE LADÍ:** hodnoty tire modelu (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
 Další (pořadí): **B pokračování)** zavěšení pro `.veh` auta (zatím `Rigid`
-+ placeholder světlost), McPherson/wishbone geometrie → **C')** skutečná spojka místo
-TC hacku, `.veh parts` (radius/hmota kol z dat) → **D)** terén. Ladění tire modelu průběžně.
++ placeholder světlost), McPherson/wishbone geometrie → **C')** `.veh parts`
+(radius/hmota kol z dat) → **D)** terén. Ladění tire modelu průběžně.

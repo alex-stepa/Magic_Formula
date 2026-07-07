@@ -384,9 +384,18 @@ struct Drivetrain {
     front_diff: Differential, // diff přední osy
     rear_diff: Differential,  // diff zadní osy
     gear: i32,              // runtime: -1 = zpátečka, 0 = neutrál, 1..=N = kvalty
-    rpm: f32,               // runtime: dopočítané otáčky (pro HUD i moment)
+    rpm: f32,               // runtime: STAV motoru (integruje se, není derivovaný z kol)
+    clutch: f32,            // runtime: 0 = rozpojená (levý Shift), 1 = sepnutá
     speed_kmh: f32,         // runtime: dopočítaná rychlost (pro HUD)
 }
+
+// --- SPOJKA + MOTOR JAKO STAV ---
+// Setrvačnost motoru (setrvačník, kg·m²) — jak rychle plyn vytočí volný motor.
+const ENGINE_INERTIA: f32 = 0.25;
+// Viskózní spojka: přenášený moment = VISC × rozdíl rychlostí (motor vs kola přes převod),
+// škálováno sepnutím (0..1) a omezeno kapacitou CAP (víc lamely neudrží → prokluz).
+const CLUTCH_VISC: f32 = 2.0;   // Nm / (rad/s) skluzu
+const CLUTCH_CAP: f32 = 300.0;  // Nm na straně motoru
 
 impl Default for Drivetrain {
     fn default() -> Self {
@@ -402,7 +411,8 @@ impl Default for Drivetrain {
             front_diff: Differential { lock: 0.0 },   // start: otevřené
             rear_diff: Differential { lock: 0.0 },
             gear: 1,
-            rpm: 0.0,
+            rpm: 850.0,   // motor běží od startu na volnoběh
+            clutch: 1.0,  // sepnutá (Shift drž při startu/řazení)
             speed_kmh: 0.0,
         }
     }
@@ -530,7 +540,7 @@ fn spawn_ui(commands: &mut Commands) {
                     let label = format!("{} — Soft-body: {file}", i + 2);
                     spawn_button(panel, &label, SpawnAction::SoftBody(path.to_string_lossy().into_owned()));
                 }
-                spawn_button(panel, "Shift+C — Clear (smazat auta)", SpawnAction::Clear);
+                spawn_button(panel, "Backspace — Clear (smazat auta)", SpawnAction::Clear);
             });
         });
 }
@@ -638,9 +648,8 @@ fn spawn_shortcuts(
     mut softbody: ResMut<SoftBody>,
     build: Res<CarBuild>,
 ) {
-    // Clear = Shift+C (samotné C je obsazené kamerou).
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    if shift && keys.just_pressed(KeyCode::KeyC) {
+    // Clear = Backspace (Shift+C nešlo: levý Shift je spojka, C kamera — kolize).
+    if keys.just_pressed(KeyCode::Backspace) {
         clear_spawned(&mut commands, &spawned, &mut softbody);
     }
     if keys.just_pressed(KeyCode::Digit1) {
@@ -1364,10 +1373,20 @@ fn engine_torque(rpm: f32, engine: &Engine) -> f32 {
 
 // Pohon auta. W = plyn, S = brzda, Space = ruční brzda; zpátečka = zařadit R (Q) a dát plyn.
 // Nepočítá fyziku — jen zapíše ZÁMĚR (moment na kola) z motoru přes převody; sílu řeší solver.
-fn vehicle_drive(keys: Res<ButtonInput<KeyCode>>, dt: Res<Drivetrain>, mut sb: ResMut<SoftBody>) {
+fn vehicle_drive(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    mut dt: ResMut<Drivetrain>,
+    mut sb: ResMut<SoftBody>,
+) {
     let throttle = if keys.pressed(KeyCode::KeyW) { 1.0 } else { 0.0 };
     let brake = if keys.pressed(KeyCode::KeyS) { 800.0 } else { 0.0 }
         + if keys.pressed(KeyCode::Space) { 1500.0 } else { 0.0 }; // ruční brzda silnější
+
+    // Spojka: levý Shift drží rozpojeno, puštění plynule sepne (skokové sepnutí = škubnutí).
+    let clutch_target = if keys.pressed(KeyCode::ShiftLeft) { 0.0 } else { 1.0 };
+    let clutch_rate = 4.0 * time.delta_secs();
+    dt.clutch += (clutch_target - dt.clutch).clamp(-clutch_rate, clutch_rate);
 
     // Převod aktuálního kvaltu (R = opačný směr). Neutrál → 0 (motor točí, kola ne).
     let ratio = match dt.gear {
@@ -1375,8 +1394,39 @@ fn vehicle_drive(keys: Res<ButtonInput<KeyCode>>, dt: Res<Drivetrain>, mut sb: R
         -1 => -dt.gearbox.ratios[0], // zpátečka: opačný smysl než 1. kvalt
         g => dt.gearbox.ratios[(g - 1) as usize],
     };
-    // Celkový moment z motoru: moment × plyn → přes převod a stálý převod.
-    let total = engine_torque(dt.rpm, &dt.engine) * throttle * ratio * dt.gearbox.final_drive;
+    let total_ratio = ratio * dt.gearbox.final_drive;
+
+    // Moment spojky: viskózní vazba motor ↔ kola (úměrná skluzu, se stropem kapacity).
+    // Neutrál nebo plně rozpojeno → nula (motor běží naprázdno).
+    let omega_e = dt.rpm * std::f32::consts::TAU / 60.0; // otáčky motoru (rad/s)
+    let t_clutch = if total_ratio != 0.0 && dt.clutch > 0.0 {
+        // průměrná rychlost hnaných kol (rad/s), přepočtená na stranu motoru
+        let (mut sum, mut n) = (0.0, 0.0);
+        for w in &sb.wheels {
+            if dt.layout.axle_fraction(w.front) > 0.0 {
+                sum += w.spin_vel;
+                n += 1.0;
+            }
+        }
+        let omega_w = if n > 0.0 { sum / n } else { 0.0 };
+        let slip = omega_e - omega_w * total_ratio;
+        (CLUTCH_VISC * slip * dt.clutch).clamp(-CLUTCH_CAP, CLUTCH_CAP)
+    } else {
+        0.0
+    };
+
+    // Motor jako stav: plyn ho roztáčí, spojka brzdí proti kolům. Pod volnoběh nespadne
+    // (regulátor volnoběhu), nad max_rpm nedostane moment (rev limiter v engine_torque).
+    let t_engine = engine_torque(dt.rpm, &dt.engine) * throttle;
+    let mut omega_new = omega_e + (t_engine - t_clutch) / ENGINE_INERTIA * time.delta_secs();
+    let idle_omega = dt.engine.idle_rpm * std::f32::consts::TAU / 60.0;
+    if omega_new < idle_omega {
+        omega_new = idle_omega;
+    }
+    dt.rpm = omega_new * 60.0 / std::f32::consts::TAU;
+
+    // Na kola jde moment SPOJKY (ne motoru) × převod — co spojka nepřenese, neexistuje.
+    let total = t_clutch * total_ratio;
 
     // Rozdělení podle DriveLayoutu: každá osa dostane svůj podíl, ten se rozpočítá mezi
     // její kola. Diferenciál (sváz rychlostí) řeší solver dle Drivetrain.{front,rear}_diff.
@@ -1446,14 +1496,11 @@ fn shift_gears(keys: Res<ButtonInput<KeyCode>>, mut dt: ResMut<Drivetrain>) {
     }
 }
 
-// Dopočítá rychlost a otáčky z aktuálního stavu solveru (pro HUD).
-// Rychlost = vodorovná rychlost těžiště rámu; RPM = otáčky hnaných kol × převod × stálý.
+// Dopočítá rychlost z aktuálního stavu solveru (pro HUD).
+// RPM tady NEpočítáme — motor je stav, integruje ho vehicle_drive (spojka).
 fn update_drivetrain(sb: Res<SoftBody>, mut dt: ResMut<Drivetrain>) {
-    let idle = dt.engine.idle_rpm; // kopie předem (čteme díl, pak píšeme runtime pole)
-    let layout = dt.layout;
     let Some(cf) = &sb.chassis else {
         dt.speed_kmh = 0.0;
-        dt.rpm = idle;
         return;
     };
 
@@ -1463,29 +1510,6 @@ fn update_drivetrain(sb: Res<SoftBody>, mut dt: ResMut<Drivetrain>) {
     let mut v: Vec3 = nodes.map(|&i| sb.vel[i]).sum::<Vec3>() / n;
     v.y = 0.0;
     dt.speed_kmh = v.length() * 3.6;
-
-    // Otáčky kola: průměr |spin_vel| hnaných kol (dle layoutu) (rad/s).
-    let mut omega = 0.0;
-    let mut cnt = 0.0;
-    for w in &sb.wheels {
-        if layout.axle_fraction(w.front) > 0.0 {
-            omega += w.spin_vel.abs();
-            cnt += 1.0;
-        }
-    }
-    if cnt > 0.0 {
-        omega /= cnt;
-    }
-
-    // RPM = ω_kola × |převod| × stálý × (60/2π). Neutrál → jen volnoběh.
-    let final_drive = dt.gearbox.final_drive;
-    let ratio = match dt.gear {
-        0 => 0.0,                                       // neutrál: kola nespojená s motorem
-        -1 => dt.gearbox.ratios[0],                     // zpátečka: zatím poměr jako 1. kvalt
-        g => dt.gearbox.ratios[(g - 1) as usize],       // 1..=N
-    };
-    let rpm = omega * ratio * final_drive * (60.0 / std::f32::consts::TAU);
-    dt.rpm = rpm.max(idle); // pod volnoběh nikdy
 }
 
 // Přepíše HUD text aktuálními hodnotami z Drivetrain.
@@ -1496,9 +1520,10 @@ fn update_hud(dt: Res<Drivetrain>, mut hud: Query<&mut Text, With<HudText>>) {
         g => g.to_string(),
     };
     let diff = if dt.rear_diff.lock > 0.5 { "ZAMČENÝ" } else { "otevřený" };
+    let clutch = if dt.clutch < 0.95 { "  SPOJKA" } else { "" };
     if let Ok(mut text) = hud.get_single_mut() {
         text.0 = format!(
-            "{:>3.0} km/h\nKvalt {}\n{:>5.0} ot/min\n{}  diff: {}",
+            "{:>3.0} km/h\nKvalt {}{clutch}\n{:>5.0} ot/min\n{}  diff: {}",
             dt.speed_kmh, gear, dt.rpm, dt.layout.label(), diff
         );
     }
