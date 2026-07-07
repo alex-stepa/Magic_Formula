@@ -286,7 +286,7 @@ const STRUT_TOWER_IN: f32 = 0.15; // věž kousek dovnitř → vzpěra šikmá j
 // opisuje top menší oblouk než hub → kolo mění odklon (camber). Orientaci disku dává
 // vektor hub→top (softbody_to_transforms), solver o camberu nic neví.
 const KNUCKLE_H: f32 = 0.55; // top nod nad hubem — vyjde ve výšce horních rohů (ramena ~vodorovná)
-const KNUCKLE_K: f32 = 150_000.0; // těhlice hub↔top = tuhá ocel (definuje rovinu kola)
+const KNUCKLE_K: f32 = 300_000.0; // těhlice hub↔top = tuhá ocel jako rám (definuje rovinu kola)
 const SUSP_DW_SPRING_K: f32 = 100_000.0; // pružina šikmo do rohu jako Coil (~0.55·k svisle)
 
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
@@ -737,8 +737,13 @@ fn build_suspension(sb: &mut SoftBody, hub: usize, top: Option<usize>, anchors: 
             let top = top.expect("DoubleWishbone potřebuje top nod (těhlici)");
             sb.add_beam(hub, anchors[0], arm_k); // dolní příčné rameno
             sb.add_beam(hub, anchors[1], arm_k); // dolní podélné rameno
-            sb.add_beam(top, anchors[3], arm_k); // horní A-rameno, přední úchyt
+            sb.add_beam(top, anchors[3], arm_k); // horní A-rameno, přední úchyt (krátké → camber)
             sb.add_beam(top, anchors[4], arm_k); // horní A-rameno, zadní úchyt
+            // Příčná výztuha topu na PROTĚJŠÍ horní roh: bez ní drží top bočně jen
+            // x-složka krátkého ramene → dopad ho přesmykne do zrcadlové polohy a kolo
+            // zůstane křivé. Dlouhé ~vodorovné rameno zdvih nebrzdí (Δ²/2L) a camber
+            // jen zmírní (oblouky 0.5 m vs 1.75 m se přetlačí ~napůl).
+            sb.add_beam(top, anchors[5], arm_k);
             sb.add_beam(hub, top, KNUCKLE_K);    // těhlice (tuhá — drží rovinu kola)
             sb.add_beam(hub, anchors[2], spring_k);
             sb.beams.last_mut().unwrap().d *= COIL_DAMP_MULT; // tlumič na pružině
@@ -913,6 +918,7 @@ fn spawn_solver_car(
             top,                     // pružina/vzpěra (nese váhu)
             body[xi + 2 + zi],       // horní roh stejné strany, stejné z → horní A-rameno (jen DW, krátké)
             body[xi + 3 - zi],       // horní roh stejné strany, opačné z → horní A-rameno (jen DW)
+            body[(4 - xi) + 2 + zi], // horní roh PROTĚJŠÍ strany, stejné z → příčná výztuha topu (jen DW)
         ];
         // Rigid potřebuje VŠECH 8 nodů (šikmé beamy do všech směrů = tuhý zámek);
         // se 3 skoro-vodorovnými úchyty by svisle skoro nedržel a houpal se.
