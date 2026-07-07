@@ -386,6 +386,7 @@ struct Drivetrain {
     gear: i32,              // runtime: -1 = zpátečka, 0 = neutrál, 1..=N = kvalty
     rpm: f32,               // runtime: STAV motoru (integruje se, není derivovaný z kol)
     clutch: f32,            // runtime: 0 = rozpojená (levý Shift), 1 = sepnutá
+    stalled: bool,          // runtime: motor chcíplý (start = R)
     speed_kmh: f32,         // runtime: dopočítaná rychlost (pro HUD)
 }
 
@@ -396,6 +397,12 @@ const ENGINE_INERTIA: f32 = 0.25;
 // škálováno sepnutím (0..1) a omezeno kapacitou CAP (víc lamely neudrží → prokluz).
 const CLUTCH_VISC: f32 = 2.0;   // Nm / (rad/s) skluzu
 const CLUTCH_CAP: f32 = 300.0;  // Nm na straně motoru
+// Regulátor volnoběhu: moment úměrný deficitu pod idle. Záměrně SLABÝ — sepnutá
+// spojka proti stojícím kolům ho přetlačí (rovnováha ~360 rpm < STALL_RPM) a motor
+// CHCÍPNE; rozjezd bez plynu tedy chce cit v noze jako ve skutečném autě.
+const IDLE_GAIN: f32 = 1.5; // Nm / (rad/s) deficitu
+// Pod tyhle otáčky motor chcípne (stalled). Start zpět: klávesa R.
+const STALL_RPM: f32 = 400.0;
 
 impl Default for Drivetrain {
     fn default() -> Self {
@@ -413,6 +420,7 @@ impl Default for Drivetrain {
             gear: 1,
             rpm: 850.0,   // motor běží od startu na volnoběh
             clutch: 1.0,  // sepnutá (Shift drž při startu/řazení)
+            stalled: false,
             speed_kmh: 0.0,
         }
     }
@@ -1415,13 +1423,26 @@ fn vehicle_drive(
         0.0
     };
 
-    // Motor jako stav: plyn ho roztáčí, spojka brzdí proti kolům. Pod volnoběh nespadne
-    // (regulátor volnoběhu), nad max_rpm nedostane moment (rev limiter v engine_torque).
-    let t_engine = engine_torque(dt.rpm, &dt.engine) * throttle;
-    let mut omega_new = omega_e + (t_engine - t_clutch) / ENGINE_INERTIA * time.delta_secs();
+    // Starter: R nahodí chcíplý motor na volnoběh (lazy starter, bez protáčení).
+    if dt.stalled && keys.just_pressed(KeyCode::KeyR) {
+        dt.stalled = false;
+        dt.rpm = dt.engine.idle_rpm;
+    }
+
+    // Motor jako stav: plyn ho roztáčí, spojka brzdí proti kolům, regulátor volnoběhu
+    // dotláčí k idle (slabě — jde přetlačit a motor chcípne). Rev limiter v engine_torque.
     let idle_omega = dt.engine.idle_rpm * std::f32::consts::TAU / 60.0;
-    if omega_new < idle_omega {
-        omega_new = idle_omega;
+    let (t_engine, t_idle) = if dt.stalled {
+        (0.0, 0.0) // chcíplý motor nedává nic, spojka ho jen dotáčí k nule
+    } else {
+        (
+            engine_torque(dt.rpm, &dt.engine) * throttle,
+            IDLE_GAIN * (idle_omega - omega_e).max(0.0),
+        )
+    };
+    let omega_new = (omega_e + (t_engine + t_idle - t_clutch) / ENGINE_INERTIA * time.delta_secs()).max(0.0);
+    if !dt.stalled && omega_new < STALL_RPM * std::f32::consts::TAU / 60.0 {
+        dt.stalled = true; // zátěž stáhla otáčky pod práh → chcíplo (start: R)
     }
     dt.rpm = omega_new * 60.0 / std::f32::consts::TAU;
 
@@ -1474,10 +1495,12 @@ fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut sb: ResMu
 // Počet kvaltů bere z namontované převodovky (díl), ne z konstanty.
 fn shift_gears(keys: Res<ButtonInput<KeyCode>>, mut dt: ResMut<Drivetrain>) {
     let top = dt.gearbox.ratios.len() as i32;
-    if keys.just_pressed(KeyCode::KeyE) {
+    // Kvalt jde zařadit jen s rozpojenou spojkou (drž levý Shift) — jako ve skutečném autě.
+    let clutch_free = dt.clutch < 0.5;
+    if keys.just_pressed(KeyCode::KeyE) && clutch_free {
         dt.gear = (dt.gear + 1).min(top); // nahoru, max nejvyšší kvalt
     }
-    if keys.just_pressed(KeyCode::KeyQ) {
+    if keys.just_pressed(KeyCode::KeyQ) && clutch_free {
         dt.gear = (dt.gear - 1).max(-1); // dolů, min zpátečka
     }
     // L = uzamykatelný diff: přepne lock obou os mezi 0 (otevřený) a 1 (uzamčený).
@@ -1520,7 +1543,13 @@ fn update_hud(dt: Res<Drivetrain>, mut hud: Query<&mut Text, With<HudText>>) {
         g => g.to_string(),
     };
     let diff = if dt.rear_diff.lock > 0.5 { "ZAMČENÝ" } else { "otevřený" };
-    let clutch = if dt.clutch < 0.95 { "  SPOJKA" } else { "" };
+    let clutch = if dt.stalled {
+        "  CHCÍPLO (R)"
+    } else if dt.clutch < 0.95 {
+        "  SPOJKA"
+    } else {
+        ""
+    };
     if let Ok(mut text) = hud.get_single_mut() {
         text.0 = format!(
             "{:>3.0} km/h\nKvalt {}{clutch}\n{:>5.0} ot/min\n{}  diff: {}",
