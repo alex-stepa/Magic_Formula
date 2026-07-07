@@ -38,6 +38,7 @@ src/
 ├── main.rs    ← App setup, UI/menu, HUD, camera, render sync (transforms + mesh)
 ├── solver.rs  ← physics core: SoftBody (SoA), node-beam solver, tire model (Pacejka)
 ├── vehicle.rs ← the car: suspension types + builders, drivetrain (engine/clutch), controls
+├── world.rs   ← terrain as a trait: World { height, normal }, FlatWorld / Hills
 ├── physics.rs ← static world (ground) ONLY, as a function -> impl Bundle for rapier
 └── veh.rs     ← loading the custom .veh (serde Deserialize)
 jbeam-rs/      ← SEPARATE .jbeam → .veh converter (own Cargo project, not part of the game)
@@ -86,9 +87,11 @@ untouched), anti-roll bar as a V-node, launch traction control, build menu (`Car
 Rigid/Coil/McPherson/DoubleWishbone — McPherson = strut onto a tower above the hub;
 DW = knuckle (top node) + SLA arms → real camber, the disk tilts along hub→top),
 clutch (left Shift; engine = integrated state, viscous coupling with capacity,
-Clear on Backspace).
+Clear on Backspace), **D)** terrain (`World` trait — solver queries height/normal,
+Fz along the surface normal, slip in the tangent plane; `Hills` procedural, flat
+zone around spawn).
 **BEING TUNED:** tire model values (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
 Next (in order): **B continuation)** suspension for `.veh` cars (still `Rigid`
 + placeholder ride height) → **C')** `.veh parts`
-(wheel radius/mass from data) → **D)** terrain. Tire model tuning ongoing.
+(wheel radius/mass from data). Tire model tuning ongoing.

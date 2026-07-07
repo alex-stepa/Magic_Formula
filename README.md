@@ -123,6 +123,7 @@ src/
 ├── main.rs    ← App setup, UI/menu, HUD, camera, render sync
 ├── solver.rs  ← physics core: SoftBody (SoA), node-beam solver, tire model
 ├── vehicle.rs ← the car: suspension + builders, drivetrain, controls
+├── world.rs   ← terrain as a trait (FlatWorld / Hills / later OSM heightfield)
 ├── physics.rs ← static world (ground) only, as impl Bundle for rapier
 └── veh.rs     ← loading the custom .veh (serde)
 ```
@@ -166,10 +167,12 @@ src/
 - [x] Clutch (left Shift) + engine as state: RPM is integrated (inertia), clutch =
   viscous coupling with capacity; only what the clutch transmits reaches the wheels.
   Clear → Backspace
+- [x] Terrain (`World` trait): solver queries `height(x,z)`/`normal(x,z)` — Fz along the
+  surface normal, slip directions projected onto the tangent plane. `Hills` = procedural
+  rolling hills (flat zone around spawn), render mesh sampled from the terrain → **step D**
 
 ### NOT yet
 - ❌ Suspension for `.veh` cars (still `Rigid` + placeholder ride height) → **step B, continuation**
-- ❌ Terrain (flat plane only) → **step D**
 - ❌ Fully tuned tire model (values being tuned)
 - ❌ Real OSM location, full build system, rally checkpoints, multiplayer
 
@@ -186,7 +189,8 @@ Order of next steps:
   `.veh` cars.
 - **C) Drivetrain** — ✅ done (engine with a torque curve + gearbox + diff/AWD
   + clutch on left Shift, engine as integrated state).
-- **D) Terrain** — `World` trait, heightfield collision, weight transfer on slopes.
+- **D) Terrain** — ✅ done (`World` trait, procedural hills, normal-based contact,
+  weight transfer on slopes for free). Grid heightfield comes with OSM/SRTM (phase 3).
 - Ongoing: **tire model tuning** (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
 
 ### Phase 3 — World
