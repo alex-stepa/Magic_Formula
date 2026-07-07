@@ -1445,7 +1445,10 @@ fn vehicle_drive(
             IDLE_GAIN * (idle_omega - omega_e).max(0.0),
         )
     };
-    let t_net = t_engine + t_idle - t_clutch - ENGINE_FRICTION * omega_e;
+    // Chcíplý motor má navíc konstantní kompresní odpor — samotné viskózní tření je
+    // exponenciála (τ=5 s), otáčky by k nule lezly desítky sekund a na HUDu „zamrzly".
+    let t_drag = ENGINE_FRICTION * omega_e + if dt.stalled { 20.0 } else { 0.0 };
+    let t_net = t_engine + t_idle - t_clutch - t_drag;
     let omega_new = (omega_e + t_net / ENGINE_INERTIA * time.delta_secs()).max(0.0);
     if dt.stalled && dt.clutch > 0.5 && omega_new > idle_omega {
         dt.stalled = false; // roztlačení: kola protočila mrtvý motor nad volnoběh → chytl
