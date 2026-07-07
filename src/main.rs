@@ -40,12 +40,13 @@ fn main() {
         // Startup = spustí se jednou na začátku (postaví scénu).
         .init_resource::<SoftBody>()
         .init_resource::<Drivetrain>()
+        .init_resource::<CarBuild>()
         .add_systems(Startup, setup)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
         .add_systems(FixedUpdate, softbody_solve)
         // Update = spustí se každý snímek (reaguje na vstup, zapisuje pozice do meshe).
         // Pořadí: nejdřív řazení + výpočet RPM, pak pohon (čte RPM), pak zbytek.
-        .add_systems(Update, (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, update_hud, camera_control, spawn_buttons, spawn_shortcuts, toggle_menu, softbody_to_transforms, update_softbody_mesh).chain())
+        .add_systems(Update, (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, update_hud, camera_control, spawn_buttons, spawn_shortcuts, toggle_menu, highlight_build_buttons, softbody_to_transforms, update_softbody_mesh).chain())
         .run();
 }
 
@@ -148,9 +149,10 @@ fn spawn_hud(commands: &mut Commands) {
 // Co dané tlačítko / klávesa udělá.
 #[derive(Component, Clone)]
 enum SpawnAction {
-    RigidCar,         // tuhá node-beam konfigurace (kvádr + 4 kola), NE rapier rigid-body
-    SoftBody(String), // node-beam soft-body z .veh souboru na téhle cestě
-    Clear,            // smaže všechna naspawnovaná auta
+    RigidCar,                     // tuhá node-beam konfigurace (kvádr + 4 kola), NE rapier rigid-body
+    SoftBody(String),             // node-beam soft-body z .veh souboru na téhle cestě
+    SetSuspension(SuspensionKind), // vybere díl zavěšení do CarBuild; přestaví stojící auto
+    Clear,                        // smaže všechna naspawnovaná auta
 }
 
 // Marker na všech naspawnovaných herních entitách (chassis, kola, nody) — podle něj Clear maže.
@@ -256,15 +258,49 @@ const TIRE_LAT: Pacejka = Pacejka { b: 8.0, c: 1.3, e: 0.97 };
 // při rozjezdu z místa — bez ní κ vystřelí a auto exploduje.
 const V_LOW: f32 = 2.0;
 
+// --- LADICÍ HODNOTY ZAVĚŠENÍ (Coil) ---
+// Ramena tuhá jako Rigid (drží kolo v ose), pružina měkká (svislý zdvih). Sag na roh:
+// ~2350 N / (coil_k·cos²θ ≈ 0.47·k) → při 60k ≈ 8 cm. Pod ~40k hub klesne pod spodní
+// rohy rámu (1.75) a ramena se překlopí — neměkčit bez zvednutí hubu.
+const SUSP_ARM_K: f32 = 150_000.0;
+const SUSP_COIL_K: f32 = 60_000.0;
+
 // Typ zavěšení = JAK builder propojí hub kola s tělem (topologie + tuhost beamů).
-// Solver o typu neví. Zatím jen Rigid; další varianty přidají mezi-nody a jiné beamy.
-#[derive(Clone, Copy)]
-#[allow(dead_code)] // další varianty přijdou; držíme šev pro rozšíření
+// Solver o typu neví.
+#[derive(Clone, Copy, PartialEq)]
 enum SuspensionKind {
     Rigid, // hub připojen tuhými beamy přímo k nejbližším nodům těla
-    // McPherson { stiffness, damping, travel },
-    // DoubleWishbone { ... },
-    // LeafSpring { ... },
+    // Svislý zdvih trikem geometrie: 2 tuhá SKORO VODOROVNÁ ramena drží kolo podélně
+    // i příčně (svisle skoro nekladou odpor — délka se mění jen ~Δ²/2L), 1 měkčí SKORO
+    // SVISLÁ pružina nese váhu a pruží. Klidová délka = spawn vzdálenost → auto si po
+    // spawnu sedne o sag ≈ váha/k_svislá níž.
+    Coil { arm_k: f32, coil_k: f32 },
+    // McPherson { ... }, DoubleWishbone { ... }, LeafSpring { ... } — časem
+}
+
+impl SuspensionKind {
+    // Presety pro build menu (výběr „dílu" bez ladicích čísel v UI).
+    const RIGID: Self = Self::Rigid;
+    const COIL: Self = Self::Coil { arm_k: SUSP_ARM_K, coil_k: SUSP_COIL_K };
+    fn label(self) -> &'static str {
+        match self {
+            Self::Rigid => "Rigid (tuhé)",
+            Self::Coil { .. } => "Coil (zdvih)",
+        }
+    }
+}
+
+// Build config = jaké DÍLY auto má. Menu píše sem, spawn_solver_car čte → výměna dílu
+// bez zásahu do solveru (stejný vzor jako Drivetrain: díl = data, resource drží volbu).
+// Zatím jen zavěšení; motor/převodovka žijí v Drivetrain, časem se sem sloučí.
+#[derive(Resource)]
+struct CarBuild {
+    suspension: SuspensionKind,
+}
+impl Default for CarBuild {
+    fn default() -> Self {
+        Self { suspension: SuspensionKind::COIL }
+    }
 }
 
 // FixedUpdate jede defaultně na 64 Hz — délka jednoho snímku solveru.
@@ -467,10 +503,10 @@ fn spawn_ui(commands: &mut Commands) {
                 ));
             });
 
-            // Panel s volbami — na startu SKRYTÝ (Display::None), toggle ho ukáže.
+            // Panel s volbami — na startu OTEVŘENÝ (toggle „☰ Menu" ho sbalí/rozbalí).
             root.spawn((
                 Node {
-                    display: Display::None,
+                    display: Display::Flex,
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(6.0),
                     ..default()
@@ -478,7 +514,10 @@ fn spawn_ui(commands: &mut Commands) {
                 MenuPanel,
             ))
             .with_children(|panel| {
-                spawn_button(panel, "1 — Testovací vůz (tuhý rám)", SpawnAction::RigidCar);
+                spawn_button(panel, "1 — Testovací vůz", SpawnAction::RigidCar);
+                // Výběr dílu zavěšení (build systém): přepne CarBuild + přestaví stojící auto.
+                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::RIGID.label()), SpawnAction::SetSuspension(SuspensionKind::RIGID));
+                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::COIL.label()), SpawnAction::SetSuspension(SuspensionKind::COIL));
                 for (i, path) in available_vehs().iter().enumerate() {
                     let file = path.file_name().unwrap().to_string_lossy();
                     let label = format!("{} — Soft-body: {file}", i + 2);
@@ -539,15 +578,37 @@ fn spawn_buttons(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<SoftBody>,
+    mut build: ResMut<CarBuild>,
 ) {
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
         }
         match action {
-            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody),
+            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build),
             SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, path),
+            SpawnAction::SetSuspension(kind) => {
+                build.suspension = *kind;
+                // Stojí-li solver auto (chassis = jen ono), přestav ho hned ať je rozdíl vidět.
+                if softbody.chassis.is_some() {
+                    clear_spawned(&mut commands, &spawned, &mut softbody);
+                    spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build);
+                }
+            }
             SpawnAction::Clear => clear_spawned(&mut commands, &spawned, &mut softbody),
+        }
+    }
+}
+
+// Zvýrazní aktivní díl zavěšení v menu (selektor musí ukázat, co je vybráno).
+fn highlight_build_buttons(build: Res<CarBuild>, mut buttons: Query<(&SpawnAction, &mut BackgroundColor)>) {
+    for (action, mut bg) in &mut buttons {
+        if let SpawnAction::SetSuspension(kind) = action {
+            *bg = if *kind == build.suspension {
+                BackgroundColor(Color::srgb(0.2, 0.45, 0.3)) // aktivní = zelené
+            } else {
+                BackgroundColor(Color::srgb(0.15, 0.15, 0.18))
+            };
         }
     }
 }
@@ -568,6 +629,7 @@ fn spawn_shortcuts(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<SoftBody>,
+    build: Res<CarBuild>,
 ) {
     // Clear = Shift+C (samotné C je obsazené kamerou).
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -575,7 +637,7 @@ fn spawn_shortcuts(
         clear_spawned(&mut commands, &spawned, &mut softbody);
     }
     if keys.just_pressed(KeyCode::Digit1) {
-        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody);
+        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build);
     }
     // Klávesy 2,3,4… = .veh soubory ve stejném pořadí jako UI tlačítka.
     let digits = [KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
@@ -590,15 +652,22 @@ fn spawn_shortcuts(
 
 // Postaví zavěšení = beamy mezi hubem kola a tělem. JAK je propojí, závisí na typu.
 // Solver o typu neví — tady se „vlévá" celá variabilita podvozku (custom suspension).
-fn build_suspension(sb: &mut SoftBody, hub: usize, body: &[usize], kind: SuspensionKind) {
+fn build_suspension(sb: &mut SoftBody, hub: usize, anchors: &[usize], kind: SuspensionKind) {
     match kind {
-        // Rigid = hub tuze připojen ke všem nodům těla → kolo drží napevno (zatím žádný zdvih).
-        // McPherson/DoubleWishbone časem přidají mezi-nody a měkčí beamy podél zdvihu.
+        // Rigid = hub tuze připojen ke všem předaným úchytům → kolo drží napevno (žádný zdvih).
         SuspensionKind::Rigid => {
             let k = 150_000.0;
-            for &b in body {
-                sb.add_beam(hub, b, k);
+            for &a in anchors {
+                sb.add_beam(hub, a, k);
             }
+        }
+        // Coil čeká anchors = [příčné rameno, podélné rameno, horní úchyt pružiny]
+        // (výběr rohů dělá volající — viz spawn_solver_car). Tlumení dopočítá add_beam
+        // z DAMPING_RATIO: měkčí k → úměrně menší d, poměrově tlumené stejně.
+        SuspensionKind::Coil { arm_k, coil_k } => {
+            sb.add_beam(hub, anchors[0], arm_k);
+            sb.add_beam(hub, anchors[1], arm_k);
+            sb.add_beam(hub, anchors[2], coil_k);
         }
     }
 }
@@ -611,6 +680,7 @@ fn spawn_solver_car(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     sb: &mut SoftBody,
+    build: &CarBuild,
 ) {
     *sb = SoftBody::default(); // nový spawn = čistý solver
     let origin = Vec3::new(0.0, 2.0, 0.0);
@@ -682,7 +752,17 @@ fn spawn_solver_car(
             ))
             .id();
         let hub = sb.add_node(hub_pos, hub_mass, hub_dbg);
-        build_suspension(sb, hub, &body, SuspensionKind::Rigid);
+        // Úchyty Coil z rohů rámu. Index rohu = 4·(sx>0) + 2·(horní) + 1·(sz>0), dané
+        // pořadím stavby těla výš. Ramena do SPODNÍCH rohů (y=1.75 ≈ výška hubu → skoro
+        // vodorovná), pružina do horního rohu nad kolem (skoro svislá).
+        let xi = if sx > 0.0 { 4 } else { 0 };
+        let zi = if sz > 0.0 { 1 } else { 0 };
+        let anchors = [
+            body[(4 - xi) + zi], // spodní roh PROTĚJŠÍ strany, stejné z → příčné rameno (drží bok)
+            body[xi + 1 - zi],   // spodní roh stejné strany, OPAČNÉ z → podélné rameno (drží tah/brzdu)
+            body[xi + 2 + zi],   // horní roh stejné strany, stejné z → pružina (nese váhu)
+        ];
+        build_suspension(sb, hub, &anchors, build.suspension);
 
         let render = commands
             .spawn((
