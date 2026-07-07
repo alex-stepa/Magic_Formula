@@ -258,6 +258,10 @@ const TIRE_LAT: Pacejka = Pacejka { b: 8.0, c: 1.3, e: 0.97 };
 // Spodní mez referenční rychlosti pro normalizaci skluzu (m/s). Brání dělení nulou
 // při rozjezdu z místa — bez ní κ vystřelí a auto exploduje.
 const V_LOW: f32 = 2.0;
+// Camber thrust: nakloněné kolo táhne do strany náklonu, F = CAMBER_THRUST·Fz·sin(γ).
+// Působí jen u kol s těhlicí (WheelC.top — DoubleWishbone); ostatní mají γ trvale 0.
+// Reálná guma ~0.5–1.0·Fz na radián; started konzervativně.
+const CAMBER_THRUST: f32 = 0.5;
 
 // --- LADICÍ HODNOTY ZAVĚŠENÍ (Coil) ---
 // Ramena tuhá jako Rigid (drží kolo v ose), pružina měkčí (svislý zdvih). Sag na roh:
@@ -1335,6 +1339,14 @@ fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixe
                     let d = MU * fy; // špička křivky = μ·Fz (víc guma neudrží)
                     let mut fl = magic_formula(kappa, long, d); // podélná síla (tah/brzda)
                     let mut fc = magic_formula(-alpha, lat, d); // boční síla (brzdí smyk)
+
+                    // Camber thrust: kolo s těhlicí (DW) nakloněné o γ táhne do strany
+                    // náklonu. sin γ = průmět osy těhlice do bočního směru kola; síla
+                    // jde PŘED kruh adheze — víc než μ·Fz guma nedá ani camberem.
+                    if let Some(t) = sb.wheels[wi].top {
+                        let up_w = (sb.pos[t] - sb.pos[hub]).normalize_or_zero();
+                        fc += CAMBER_THRUST * fy * up_w.dot(wl);
+                    }
 
                     // kruh adheze jako pojistka na kombinovaný skluz: |(podélná, boční)| ≤ MU·Fz
                     let fmax = MU * fy;
