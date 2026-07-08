@@ -291,11 +291,12 @@ pub fn spawn_solver_car(
     materials: &mut Assets<StandardMaterial>,
     sb: &mut SoftBody,
     build: &CarBuild,
+    ground_y: f32,
 ) {
     *sb = SoftBody::default(); // nový spawn = čistý solver
-    // Spawn z 2 m = drop test zavěšení při každém spawnu (Coil ho musí ustát:
+    // Spawn 2 m nad terénem = drop test zavěšení při každém spawnu (Coil ho musí ustát:
     // tužší pružina + tlumič, viz SUSP_COIL_K / COIL_DAMP_MULT).
-    let origin = Vec3::new(0.0, 2.0, 0.0);
+    let origin = Vec3::new(0.0, ground_y + 2.0, 0.0);
 
     let node_mesh = meshes.add(Sphere::new(0.06));
     let node_material = materials.add(Color::srgb(0.9, 0.3, 0.2));
@@ -504,12 +505,13 @@ pub fn spawn_softbody(
     materials: &mut Assets<StandardMaterial>,
     sb: &mut SoftBody,
     path: &str,
+    ground_y: f32,
 ) {
     let raw = std::fs::read_to_string(path).expect("nelze číst .veh");
     let vehicle: veh::Vehicle = serde_json::from_str(&raw).expect("nevalidní .veh");
     info!("Načteno vozidlo z .veh: {} nodů, {} beamů", vehicle.nodes.len(), vehicle.beams.len());
 
-    let origin = Vec3::new(0.0, 4.0, 6.0); // PŘED auto (+Z) a ve vzduchu, ať to chase kamera vidí
+    let origin = Vec3::new(0.0, ground_y + 4.0, 6.0); // PŘED auto (+Z) a ve vzduchu, ať to chase kamera vidí
 
     // Nový spawn = čistý solver (jinak by se sčítala dvě auta do jednoho stavu).
     *sb = SoftBody::default();

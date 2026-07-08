@@ -290,20 +290,22 @@ fn spawn_buttons(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<SoftBody>,
     mut build: ResMut<CarBuild>,
+    terrain: Res<Terrain>,
 ) {
+    let ground_y = terrain.0.height(0.0, 0.0);
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
         }
         match action {
-            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build),
-            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, path),
+            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build, ground_y),
+            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, path, ground_y),
             SpawnAction::SetSuspension(kind) => {
                 build.suspension = *kind;
                 // Stojí-li solver auto (chassis = jen ono), přestav ho hned ať je rozdíl vidět.
                 if softbody.chassis.is_some() {
                     clear_spawned(&mut commands, &spawned, &mut softbody);
-                    spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build);
+                    spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build, ground_y);
                 }
             }
             SpawnAction::Clear => clear_spawned(&mut commands, &spawned, &mut softbody),
@@ -341,20 +343,22 @@ fn spawn_shortcuts(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<SoftBody>,
     build: Res<CarBuild>,
+    terrain: Res<Terrain>,
 ) {
     // Clear = Backspace (Shift+C nešlo: levý Shift je spojka, C kamera — kolize).
     if keys.just_pressed(KeyCode::Backspace) {
         clear_spawned(&mut commands, &spawned, &mut softbody);
     }
+    let ground_y = terrain.0.height(0.0, 0.0);
     if keys.just_pressed(KeyCode::Digit1) {
-        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build);
+        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build, ground_y);
     }
     // Klávesy 2,3,4… = .veh soubory ve stejném pořadí jako UI tlačítka.
     let digits = [KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
     if digits.iter().any(|d| keys.just_pressed(*d)) {
         for (i, path) in available_vehs().iter().enumerate() {
             if i < digits.len() && keys.just_pressed(digits[i]) {
-                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &path.to_string_lossy());
+                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &path.to_string_lossy(), ground_y);
             }
         }
     }
