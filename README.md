@@ -4,7 +4,7 @@ Rally + freeroam game with a modular car physics architecture inspired by BeamNG
 Own format, own implementation, own identity. Potential Steam release.
 
 - **Name:** Magic Formula
-- **Parts:** `magic-formula` (game) + `tools/jbeam-rs` (local converter, outside git)
+- **Parts:** `magic-formula` (game) + [`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) (`.jbeam` → `.veh` converter, separate repo)
 
 ---
 
@@ -14,9 +14,9 @@ Own format, own implementation, own identity. Potential Steam release.
 Rust + Bevy, custom `.veh` format, node-beam physics on a **custom solver**
 (rapier remains only for the static world/ground).
 
-### 2. `tools/jbeam-rs` — local converter
+### 2. [`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) — the converter
 Parses BeamNG `.jbeam` files and converts them into the custom `.veh` format.
-Separate crate, **not part of the game build or git** (gitignored) — kept locally only.
+Standalone crate in its **own repository**, no dependency on the game.
 
 ---
 
@@ -132,12 +132,11 @@ src/
 
 ## What's done
 
-### `jbeam-rs` (converter)
+### converter — [`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) (separate repo)
 - [x] `.jbeam` parsing (custom preprocess — jbeam has missing commas, not clean json5)
 - [x] Conversion of nodes, beams, **wheels**, triangles to `.veh`
 - [x] CLI: `jbeam-rs input.jbeam -o output.veh`
-- [x] Tested on a real `.jbeam` car (500 nodes, 5871 beams, 4 wheels, 791 triangles;
-  `.veh` assets are not kept in the repo)
+- [x] Tested on a real `.jbeam` car (500 nodes, 5871 beams, 4 wheels, 791 triangles)
 
 ### `magic-formula`
 - [x] Bevy setup, window, camera, light, flat ground

@@ -41,10 +41,10 @@ src/
 ├── world.rs   ← terrain as a trait: World { height, normal }, FlatWorld / Hills
 ├── physics.rs ← static world (ground) ONLY, as a function -> impl Bundle for rapier
 └── veh.rs     ← loading the custom .veh (serde Deserialize)
-jbeam-rs/      ← SEPARATE .jbeam → .veh converter (own Cargo project, not part of the game)
 ```
 
-Note: two `src/` folders are intentional — `./src` is the game, `jbeam-rs/src` is the converter.
+Note: the `.jbeam` → `.veh` converter lives in its own repository,
+[`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) — no longer part of this tree.
 
 ## Architecture — how the car actually works
 
