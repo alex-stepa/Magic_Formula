@@ -128,12 +128,18 @@ impl SoftBody {
     // Přidá beam mezi dva nody. Klidová délka = aktuální vzdálenost, tlumení dle ζ a tuhosti.
     pub fn add_beam(&mut self, i: usize, j: usize, k: f32) {
         let mu = 1.0 / (self.inv_mass[i] + self.inv_mass[j]); // redukovaná hmotnost pružiny
+        self.add_beam_damped(i, j, k, 2.0 * DAMPING_RATIO * (k * mu).sqrt());
+    }
+
+    // Beam s EXPLICITNÍM tlumením (např. z .veh: pružina k>0 d=0, tlumič k=0 d>0).
+    // add_beam tlumení dopočítává z DAMPING_RATIO — tohle ho bere jak je.
+    pub fn add_beam_damped(&mut self, i: usize, j: usize, k: f32, d: f32) {
         self.beams.push(BeamC {
             i,
             j,
             rest: (self.pos[i] - self.pos[j]).length(),
             k,
-            d: 2.0 * DAMPING_RATIO * (k * mu).sqrt(),
+            d,
         });
     }
 

@@ -537,13 +537,17 @@ pub fn spawn_softbody(
         node_idx.insert(node.id.as_str(), (entity, i));
     }
 
-    // Beamy → BeamC do solveru. REÁLNÁ tuhost z .veh — žádný scale, žádný strop.
+    // Beamy → BeamC do solveru. REÁLNÁ tuhost i tlumení z .veh — pružina (k>0, d=0)
+    // i čistý tlumič (k=0, d>0) projdou beze změny. Fallback jen pro starý .veh bez materiálů.
     for beam in &vehicle.beams {
         let (Some(&(_, i)), Some(&(_, j))) = (node_idx.get(beam.a.as_str()), node_idx.get(beam.b.as_str())) else {
             continue; // beam odkazuje na neexistující nod → přeskoč
         };
-        let k = if beam.stiffness > 0.0 { beam.stiffness } else { 1000.0 };
-        sb.add_beam(i, j, k);
+        if beam.stiffness == 0.0 && beam.damping == 0.0 {
+            sb.add_beam(i, j, 1000.0); // starý formát: dopočítej d z DAMPING_RATIO
+        } else {
+            sb.add_beam_damped(i, j, beam.stiffness, beam.damping);
+        }
     }
 
     // --- A1+A2: KOLA z .veh ---
@@ -598,7 +602,6 @@ pub fn spawn_softbody(
     let mean_z = wheels.iter().map(|(_, p)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
 
     // 2. průchod: hub-node + render disk + zavěšení (Rigid) + WheelC.
-    let mut hub_idxs: Vec<usize> = Vec::new(); // pro tuhý rám mezi koly (níž)
     for (anchors, hub_pos) in &wheels {
         let mut hub_pos = *hub_pos;
         // .veh dá kola moc inboard (hub = průměr zatažených suspension nodů). Vytlač je ven
@@ -629,7 +632,6 @@ pub fn spawn_softbody(
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
         let hub = sb.add_node(hub_pos, hub_mass, render);
         build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid); // přitáhni hub na suspension nody
-        hub_idxs.push(hub);
         sb.wheels.push(WheelC {
             hub,
             top: None, // .veh zavěšení zatím Rigid — kolo vzpřímené s rámem
@@ -644,15 +646,6 @@ pub fn spawn_softbody(
             steered: front, // přední = řízená (A4 to případně doladí)
             tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
         });
-    }
-
-    // Tuhý rám mezi koly (jako plně provázaný rám test auta): drží karoserii, ať se
-    // neprověsí mezi nápravami až na zem, a přenáší hnací sílu jako CELEK (ne jen lokální
-    // deformace u hnaných kol). 4 huby → 6 beamů, tuhé jako rám test auta.
-    for a in 0..hub_idxs.len() {
-        for b in (a + 1)..hub_idxs.len() {
-            sb.add_beam(hub_idxs[a], hub_idxs[b], 300_000.0);
-        }
     }
 
     // --- A3: ChassisFrame z nodů Fabie (směr auta pro solver/kameru/render) ---
