@@ -556,10 +556,7 @@ pub fn spawn_softbody(
     // jejich střed NENÍ skutečná poloha kola (přední i zadní by splynuly). Reálnou pozici
     // dostaneme z jejich beam-SOUSEDŮ (= suspension nody fh*/rh*…), co globální pozice mají.
     // Tytéž sousedy = úchyty zavěšení (build_suspension), takže hub na nich rovnou visí.
-    let wheel_radius = 0.34;
-    let wheel_width = 0.20;
     let hub_mass = 35.0;
-    let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
     let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
     let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
@@ -577,7 +574,7 @@ pub fn spawn_softbody(
 
     // 1. průchod: pro každé kolo poskládej úchyty (sousedi axle nodů, bez nich samých)
     // a z jejich průměru spočti REÁLNOU pozici hubu.
-    let mut wheels: Vec<(Vec<usize>, Vec3)> = Vec::new(); // (úchyty zavěšení, hub_pos)
+    let mut wheels: Vec<(Vec<usize>, Vec3, f32, f32)> = Vec::new(); // (úchyty, hub_pos, radius, width)
     for wheel in &vehicle.wheels {
         let (Some(&(_, n1)), Some(&(_, n2))) =
             (node_idx.get(wheel.node1.as_str()), node_idx.get(wheel.node2.as_str()))
@@ -596,26 +593,27 @@ pub fn spawn_softbody(
             continue; // bez úchytů neumíme kolo umístit ani zavěsit
         }
         let hub_pos = anchors.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / anchors.len() as f32;
-        wheels.push((anchors, hub_pos));
+        // Rozměry z .veh; 0 = data chyběla (tire party mimo mod) → fallback níž.
+        let radius = if wheel.radius > 0.0 { wheel.radius } else { 0.34 };
+        let width = if wheel.width > 0.0 { wheel.width } else { 0.20 };
+        wheels.push((anchors, hub_pos, radius, width));
     }
     // Průměrné z hubů → hranice mezi přední (větší z) a zadní (menší z) osou.
-    let mean_z = wheels.iter().map(|(_, p)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
+    let mean_z = wheels.iter().map(|(_, p, _, _)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
 
     // 2. průchod: hub-node + render disk + zavěšení (Rigid) + WheelC.
-    for (anchors, hub_pos) in &wheels {
-        let mut hub_pos = *hub_pos;
+    for &(ref anchors, hub_pos, radius, width) in &wheels {
+        let mut hub_pos = hub_pos;
         // .veh dá kola moc inboard (hub = průměr zatažených suspension nodů). Vytlač je ven
         // na rozumný rozchod, ať nejsou zastrčená pod karoserií. Rest-length beamů zavěšení
         // (build_suspension níž) tuhle polohu zafixuje, i když anchory zůstanou inboard.
+        // ponytail: konstanta — reálný rozchod je v jbeam nodeOffset jako $výraz
+        // ($trackwidth…), vyhodnocení proměnných až bude potřeba víc aut.
         hub_pos.x = hub_pos.x.signum() * 0.80;
-        // Posaď kolo NÍŽ pod suspension nody = světlá výška. Dno Fabie je nízko (y≈0, hub≈0.32);
-        // s realistickým kolem by dřelo o zem (tření přilepí auto). Spuštěním hubu se karoserie
-        // zvedne nad zem. Rest-length beamů zavěšení (build_suspension) tuhle polohu zafixuje.
-        hub_pos.y -= 0.14;
         let front = hub_pos.z > mean_z; // přední osa = +z (přední kola Fabie vyšla na +z)
         let render = commands
             .spawn((
-                Mesh3d(wheel_mesh.clone()),
+                Mesh3d(meshes.add(Cylinder::new(radius, width))),
                 MeshMaterial3d(wheel_material.clone()),
                 Transform::from_translation(hub_pos),
                 Spawned,
@@ -624,7 +622,7 @@ pub fn spawn_softbody(
                 w.spawn((
                     Mesh3d(marker_mesh.clone()),
                     MeshMaterial3d(marker_material.clone()),
-                    Transform::from_xyz(0.0, 0.0, wheel_radius + 0.03),
+                    Transform::from_xyz(0.0, 0.0, radius + 0.03),
                 ));
             })
             .id();
@@ -636,7 +634,7 @@ pub fn spawn_softbody(
             hub,
             top: None, // .veh zavěšení zatím Rigid — kolo vzpřímené s rámem
             render,
-            radius: wheel_radius,
+            radius,
             spin: 0.0,
             spin_vel: 0.0,
             steer: 0.0,

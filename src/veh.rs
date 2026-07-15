@@ -50,4 +50,10 @@ pub struct Wheel {
     pub node1: String,
     pub node2: String,
     pub dir: i32,
+    // Rozměry z jbeam pressureWheels (radius/tireWidth). 0 = v datech nebyly
+    // (tire party bývají v BeamNG common obsahu mimo mod) → hra dosadí fallback.
+    #[serde(default)]
+    pub radius: f32,
+    #[serde(default)]
+    pub width: f32,
 }
