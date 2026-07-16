@@ -38,6 +38,10 @@ pub const SUSP_COIL_K: f32 = 100_000.0;
 // Násobek tlumení coil beamu: globální DAMPING_RATIO 0.25 je proti zvonění rámu,
 // skutečný tlumič zavěšení má ζ ≈ 0.6–0.9 — dopad i kolébání má sežrat tlumič.
 pub const COIL_DAMP_MULT: f32 = 3.5;
+// Dorazy zdvihu pružiny: ±STOP_TRAVEL od klidové délky, pak nastoupí dorazová pružina.
+// Hodnoty dle BeamNG (shortBoundRange ~0.065 m, beamLimitSpring ~200k).
+pub const STOP_TRAVEL: f32 = 0.06;
+pub const STOP_K: f32 = 200_000.0;
 // Stabilizátor (V-nod nad osou): roll napíná ramena V (svislá složka ~0.45 → roll
 // tuhost ~0.2·k na kolo), bounce V-nod jen sveze s koly → žádný odpor. Viz build_antiroll.
 pub const ARB_K: f32 = 100_000.0;
@@ -108,6 +112,8 @@ impl Default for CarBuild {
 }
 
 // Motor = díl. Moment podle RPM dá momentová křivka (body (rpm, Nm), lineární interpolace).
+// Deserialize: díl se dá načíst přímo z .veh (sekce "engine"). Debug chce veh::Vehicle.
+#[derive(Debug, serde::Deserialize)]
 pub struct Engine {
     pub torque_curve: Vec<(f32, f32)>, // (rpm, Nm) — vzestupně podle rpm
     pub max_rpm: f32,                  // omezovač otáček
@@ -115,13 +121,25 @@ pub struct Engine {
 }
 
 // Převodovka = díl. Poměry kvaltů + stálý převod (rozvodovka).
+#[derive(Debug, serde::Deserialize)]
 pub struct Gearbox {
     pub ratios: Vec<f32>, // poměry pro kvalty 1..N
     pub final_drive: f32, // stálý převod
 }
 
+// Brzdy = díl. Brzdný moment NA KOLO (Nm) při plném sešlápnutí, per náprava — přední
+// brzdí víc (přenos zátěže). Ruční brzda působí jen na zadní (jako v reálném autě).
+#[derive(Debug, serde::Deserialize)]
+pub struct Brakes {
+    pub front: f32,
+    pub rear: f32,
+    pub parking: f32,
+}
+
 // Rozvod pohonu = nastavení (data). Které osy táhnou + jak se mezi ně dělí moment.
-#[derive(Clone, Copy)]
+// V .veh: "fwd"/"rwd" string, AWD objekt {"awd":{"front":0.5}} (serde externí tag).
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DriveLayout {
     Fwd,                // přední pohon
     Rwd,                // zadní pohon
@@ -157,6 +175,7 @@ pub struct Differential {
 pub struct Drivetrain {
     pub engine: Engine,         // namontovaný motor
     pub gearbox: Gearbox,       // namontovaná převodovka
+    pub brakes: Brakes,         // namontované brzdy (moment per náprava)
     pub layout: DriveLayout,    // FWD/RWD/AWD (data, přepínatelné)
     pub front_diff: Differential, // diff přední osy
     pub rear_diff: Differential,  // diff zadní osy
@@ -194,6 +213,8 @@ impl Default for Drivetrain {
                 idle_rpm: 850.0,
             },
             gearbox: Gearbox { ratios: vec![3.5, 2.1, 1.4, 1.0, 0.8], final_drive: 3.9 },
+            // ~65/35 dopředu (přenos zátěže při brzdění); parking dle dřívějšího Space=1500
+            brakes: Brakes { front: 1000.0, rear: 550.0, parking: 1500.0 },
             layout: DriveLayout::Rwd,                 // start: zadní pohon
             front_diff: Differential { lock: 0.0 },   // start: otevřené
             rear_diff: Differential { lock: 0.0 },
@@ -204,6 +225,16 @@ impl Default for Drivetrain {
             speed_kmh: 0.0,
         }
     }
+}
+
+// Poslední přidaný beam = pružina zavěšení: tlumič (COIL_DAMP_MULT) + dorazy zdvihu
+// (gumový doraz při stlačení, odskokový popruh při natažení).
+fn finish_spring(sb: &mut SoftBody) {
+    let b = sb.beams.last_mut().unwrap();
+    b.d *= COIL_DAMP_MULT;
+    b.min = b.rest - STOP_TRAVEL;
+    b.max = b.rest + STOP_TRAVEL;
+    b.stop_k = STOP_K;
 }
 
 // Postaví zavěšení = beamy mezi hubem kola a tělem. JAK je propojí, závisí na typu.
@@ -227,8 +258,8 @@ pub fn build_suspension(sb: &mut SoftBody, hub: usize, top: Option<usize>, ancho
             sb.add_beam(hub, anchors[0], arm_k);
             sb.add_beam(hub, anchors[1], arm_k);
             sb.add_beam(hub, anchors[2], coil_k);
-            // Tlumič sedí na pružině: zesil d posledního beamu (builder-side, solver netknutý).
-            sb.beams.last_mut().unwrap().d *= COIL_DAMP_MULT;
+            // Tlumič sedí na pružině + dorazy zdvihu (builder-side, solver netknutý).
+            finish_spring(sb);
         }
         // Double wishbone čeká anchors = [.., .., pružina, horní A přední, horní A zadní]
         // a top = těhlice (staví ji spawn_solver_car). Dolní ramena dlouhá (protější rohy),
@@ -246,7 +277,7 @@ pub fn build_suspension(sb: &mut SoftBody, hub: usize, top: Option<usize>, ancho
             sb.add_beam(top, anchors[5], arm_k);
             sb.add_beam(hub, top, KNUCKLE_K);    // těhlice (tuhá — drží rovinu kola)
             sb.add_beam(hub, anchors[2], spring_k);
-            sb.beams.last_mut().unwrap().d *= COIL_DAMP_MULT; // tlumič na pružině
+            finish_spring(sb); // tlumič na pružině + dorazy zdvihu
         }
     }
 }
@@ -290,9 +321,16 @@ pub fn spawn_solver_car(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     sb: &mut SoftBody,
+    dt: &mut Drivetrain,
     build: &CarBuild,
     ground_y: f32,
 ) {
+    // Testovací auto jezdí na sériových dílech — vrátit je (po .veh autě by tu zůstaly jeho).
+    let stock = Drivetrain::default();
+    dt.engine = stock.engine;
+    dt.gearbox = stock.gearbox;
+    dt.layout = stock.layout;
+    dt.gear = dt.gear.min(dt.gearbox.ratios.len() as i32);
     *sb = SoftBody::default(); // nový spawn = čistý solver
     // Spawn 2 m nad terénem = drop test zavěšení při každém spawnu (Coil ho musí ustát:
     // tužší pružina + tlumič, viz SUSP_COIL_K / COIL_DAMP_MULT).
@@ -504,17 +542,35 @@ pub fn spawn_softbody(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     sb: &mut SoftBody,
+    dt: &mut Drivetrain,
     path: &str,
     ground_y: f32,
 ) {
     let raw = std::fs::read_to_string(path).expect("nelze číst .veh");
-    let vehicle: veh::Vehicle = serde_json::from_str(&raw).expect("nevalidní .veh");
+    let mut vehicle: veh::Vehicle = serde_json::from_str(&raw).expect("nevalidní .veh");
     info!("Načteno vozidlo z .veh: {} nodů, {} beamů", vehicle.nodes.len(), vehicle.beams.len());
+
+    // Motor/převodovka z .veh; starý .veh bez nich → díly testovacího auta (Default).
+    let stock = Drivetrain::default();
+    dt.engine = vehicle.engine.take().unwrap_or(stock.engine);
+    dt.gearbox = vehicle.gearbox.take().unwrap_or(stock.gearbox);
+    dt.layout = vehicle.layout.unwrap_or(stock.layout);
+    // Nová skříň může mít míň kvaltů, než je zařazeno → srovnat, ať se neindexuje mimo.
+    dt.gear = dt.gear.min(dt.gearbox.ratios.len() as i32);
 
     let origin = Vec3::new(0.0, ground_y + 4.0, 6.0); // PŘED auto (+Z) a ve vzduchu, ať to chase kamera vidí
 
     // Nový spawn = čistý solver (jinak by se sčítala dvě auta do jednoho stavu).
     *sb = SoftBody::default();
+    sb.from_veh = true; // menu dílů (SetSuspension) tohle auto nepřestavuje
+
+    // AXLE nody kol (fw1r…) mají v jbeam jen LOKÁLNÍ souřadnice kola (~[±x,0,0]) —
+    // v globálním prostoru nesmysl: visely by na mega-tuhých beamech pod podlahou,
+    // drhly o zem a sebraly kolům zátěž (= žádný grip). Do solveru NEJDOU; slouží
+    // jen jako reference, přes jejich beamy se najdou suspension nody (úchyty).
+    let axle_ids: std::collections::HashSet<&str> = vehicle.wheels.iter()
+        .flat_map(|w| [w.node1.as_str(), w.node2.as_str()])
+        .collect();
 
     // Sdílený mesh + materiál pro všechny nody (1067× nepřidávat nový asset = výkon).
     let node_mesh = meshes.add(Sphere::new(0.04));
@@ -525,6 +581,9 @@ pub fn spawn_softbody(
 
     // Nody → render kuličky (BEZ rapieru) + záznam do solveru přes helper.
     for node in &vehicle.nodes {
+        if axle_ids.contains(node.id.as_str()) {
+            continue; // axle nod kola — viz výše, do solveru nepatří
+        }
         let entity = commands
             .spawn((
                 Mesh3d(node_mesh.clone()),
@@ -548,6 +607,11 @@ pub fn spawn_softbody(
         } else {
             sb.add_beam_damped(i, j, beam.stiffness, beam.damping);
         }
+        // ponytail: předpětí (beam.rest) VYPNUTO — okamžitá aplikace na všech 134 beamů
+        // (i caster/toe/camber) zbortí geometrii zavěšení (kola se stáhnou k sobě).
+        // BeamNG ho najíždí postupně (beamPrecompressionTime); až se .veh integrace
+        // vrátí, aplikovat jen na pružiny (k>0, d=0) nebo s náběhem.
+        let _ = beam.rest;
     }
 
     // --- A1+A2: KOLA z .veh ---
@@ -561,38 +625,41 @@ pub fn spawn_softbody(
     let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
     let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
 
-    // Sousedství přes beamy (index nodu → indexy spojené beamem). sb.pos teď = jen nody .veh.
-    let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); sb.pos.len()];
+    // Sousedství přes beamy PODLE ID (axle nody v solveru nejsou, ale jejich beamy
+    // v surových datech ano — právě přes ně se dojde k suspension nodům).
+    let mut neighbors: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
     for beam in &vehicle.beams {
-        if let (Some(&(_, i)), Some(&(_, j))) =
-            (node_idx.get(beam.a.as_str()), node_idx.get(beam.b.as_str()))
-        {
-            neighbors[i].push(j);
-            neighbors[j].push(i);
-        }
+        neighbors.entry(beam.a.as_str()).or_default().push(beam.b.as_str());
+        neighbors.entry(beam.b.as_str()).or_default().push(beam.a.as_str());
     }
 
-    // 1. průchod: pro každé kolo poskládej úchyty (sousedi axle nodů, bez nich samých)
-    // a z jejich průměru spočti REÁLNOU pozici hubu.
+    // 1. průchod: pro každé kolo poskládej úchyty (sousedi axle nodů, co v solveru
+    // existují) a z jejich průměru spočti REÁLNOU pozici hubu.
     let mut wheels: Vec<(Vec<usize>, Vec3, f32, f32)> = Vec::new(); // (úchyty, hub_pos, radius, width)
     for wheel in &vehicle.wheels {
-        let (Some(&(_, n1)), Some(&(_, n2))) =
-            (node_idx.get(wheel.node1.as_str()), node_idx.get(wheel.node2.as_str()))
-        else {
-            continue; // kolo odkazuje na neexistující nod → přeskoč
-        };
         let mut anchors: Vec<usize> = Vec::new();
-        for &axle in &[n1, n2] {
-            for &nb in &neighbors[axle] {
-                if nb != n1 && nb != n2 && !anchors.contains(&nb) {
-                    anchors.push(nb);
+        for axle in [wheel.node1.as_str(), wheel.node2.as_str()] {
+            for &nb in neighbors.get(axle).map(|v| v.as_slice()).unwrap_or(&[]) {
+                // node_idx nezná axle nody ani neexistující id → projde jen skutečný nod
+                if let Some(&(_, i)) = node_idx.get(nb) {
+                    if !anchors.contains(&i) {
+                        anchors.push(i);
+                    }
                 }
             }
         }
         if anchors.is_empty() {
             continue; // bez úchytů neumíme kolo umístit ani zavěsit
         }
-        let hub_pos = anchors.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / anchors.len() as f32;
+        let mut hub_pos = anchors.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / anchors.len() as f32;
+        // Přesný střed kola z .veh (nodeOffset slotu): průměr úchytů ho jen aproximuje —
+        // u zadní vlečné nápravy lže o ~0.3 m dopředu (rameno táhne průměr k předku).
+        // x necháváme z úchytů: nese znaménko strany a stejně se tlačí na rozchod níž.
+        if let Some(c) = wheel.center {
+            let p = origin + veh_pos(c);
+            hub_pos.y = p.y;
+            hub_pos.z = p.z;
+        }
         // Rozměry z .veh; 0 = data chyběla (tire party mimo mod) → fallback níž.
         let radius = if wheel.radius > 0.0 { wheel.radius } else { 0.34 };
         let width = if wheel.width > 0.0 { wheel.width } else { 0.20 };
@@ -650,7 +717,7 @@ pub fn spawn_softbody(
     // Klasifikace jako u test auta: front = +z, right = +x (handedness, ať up = fwd×right = +y).
     // POZOR: pravá kola Fabie jsou fyzicky na −x → „right" rám může vyjít zrcadlově. Když A/D
     // zatáčí na opačnou stranu, otoč znaménko steeru (nebo zde prohoď left↔right).
-    let body_count = vehicle.nodes.len(); // nody Fabie = indexy 0..body_count (huby jsou až za nimi)
+    let body_count = node_idx.len(); // spawnuté nody Fabie = indexy 0..body_count (huby jsou až za nimi)
     let center = (0..body_count).map(|i| sb.pos[i]).sum::<Vec3>() / body_count as f32;
     let (mut front, mut rear, mut left, mut right) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for i in 0..body_count {
@@ -673,11 +740,14 @@ pub fn spawn_softbody(
     let mut vert_of: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
     let mut vertex_positions: Vec<[f32; 3]> = Vec::with_capacity(vehicle.nodes.len());
     let mut vertex_nodes: Vec<Entity> = Vec::with_capacity(vehicle.nodes.len());
-    for (i, node) in vehicle.nodes.iter().enumerate() {
-        vert_of.insert(node.id.as_str(), i as u32);
+    for node in &vehicle.nodes {
+        let Some(&(entity, _)) = node_idx.get(node.id.as_str()) else {
+            continue; // axle nod — v solveru není, vrchol pro něj nemá kdo hýbat
+        };
+        vert_of.insert(node.id.as_str(), vertex_positions.len() as u32);
         let p = origin + veh_pos(node.pos);
         vertex_positions.push([p.x, p.y, p.z]);
-        vertex_nodes.push(node_idx[node.id.as_str()].0);
+        vertex_nodes.push(entity);
     }
     // Indexy z trojúhelníků (přeskoč ty, co odkazují na neznámý nod).
     let mut indices: Vec<u32> = Vec::new();
@@ -737,8 +807,8 @@ pub fn vehicle_drive(
     mut sb: ResMut<SoftBody>,
 ) {
     let throttle = if keys.pressed(KeyCode::KeyW) { 1.0 } else { 0.0 };
-    let brake = if keys.pressed(KeyCode::KeyS) { 800.0 } else { 0.0 }
-        + if keys.pressed(KeyCode::Space) { 1500.0 } else { 0.0 }; // ruční brzda silnější
+    let braking = keys.pressed(KeyCode::KeyS);
+    let parking = keys.pressed(KeyCode::Space); // ruční brzda — jen zadní náprava
 
     // Spojka: levý Shift drží rozpojeno, puštění plynule sepne (skokové sepnutí = škubnutí).
     let clutch_target = if keys.pressed(KeyCode::ShiftLeft) { 0.0 } else { 1.0 };
@@ -825,7 +895,12 @@ pub fn vehicle_drive(
         if slip > 0.3 {
             wheel.drive_torque *= 0.3 / slip;
         }
-        wheel.brake = brake; // brzdí všechna kola
+        // Brzdný moment per náprava z dílu Brakes; ručka přičítá jen na zadní.
+        wheel.brake = if braking {
+            if wheel.front { dt.brakes.front } else { dt.brakes.rear }
+        } else {
+            0.0
+        } + if parking && !wheel.front { dt.brakes.parking } else { 0.0 };
     }
 }
 

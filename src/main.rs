@@ -289,6 +289,7 @@ fn spawn_buttons(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<SoftBody>,
+    mut drivetrain: ResMut<Drivetrain>,
     mut build: ResMut<CarBuild>,
     terrain: Res<Terrain>,
 ) {
@@ -298,14 +299,15 @@ fn spawn_buttons(
             continue;
         }
         match action {
-            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build, ground_y),
-            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, path, ground_y),
+            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, ground_y),
+            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, path, ground_y),
             SpawnAction::SetSuspension(kind) => {
                 build.suspension = *kind;
-                // Stojí-li solver auto (chassis = jen ono), přestav ho hned ať je rozdíl vidět.
-                if softbody.chassis.is_some() {
+                // Stojí-li TESTOVACÍ auto, přestav ho hned ať je rozdíl vidět.
+                // .veh auto ne — má zavěšení z reálných dat, menu dílů se ho netýká.
+                if softbody.chassis.is_some() && !softbody.from_veh {
                     clear_spawned(&mut commands, &spawned, &mut softbody);
-                    spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build, ground_y);
+                    spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, ground_y);
                 }
             }
             SpawnAction::Clear => clear_spawned(&mut commands, &spawned, &mut softbody),
@@ -342,6 +344,7 @@ fn spawn_shortcuts(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<SoftBody>,
+    mut drivetrain: ResMut<Drivetrain>,
     build: Res<CarBuild>,
     terrain: Res<Terrain>,
 ) {
@@ -351,14 +354,14 @@ fn spawn_shortcuts(
     }
     let ground_y = terrain.0.height(0.0, 0.0);
     if keys.just_pressed(KeyCode::Digit1) {
-        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &build, ground_y);
+        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, ground_y);
     }
     // Klávesy 2,3,4… = .veh soubory ve stejném pořadí jako UI tlačítka.
     let digits = [KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
     if digits.iter().any(|d| keys.just_pressed(*d)) {
         for (i, path) in available_vehs().iter().enumerate() {
             if i < digits.len() && keys.just_pressed(digits[i]) {
-                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &path.to_string_lossy(), ground_y);
+                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &path.to_string_lossy(), ground_y);
             }
         }
     }
@@ -483,15 +486,21 @@ fn camera_control(
     keys: Res<ButtonInput<KeyCode>>,
     sb: Res<SoftBody>,
     mut fpv: Local<bool>,
-    mut camera: Query<&mut Transform, With<Camera3d>>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
     if keys.just_pressed(KeyCode::KeyC) {
         *fpv = !*fpv; // překlop mód
+        // FPV širší záběr (periferie jako v kokpitu), chase zpět na default 45°.
+        if let Ok((_, mut proj)) = camera.get_single_mut() {
+            if let Projection::Perspective(p) = proj.as_mut() {
+                p.fov = if *fpv { 75.0_f32.to_radians() } else { 45.0_f32.to_radians() };
+            }
+        }
     }
 
     // Bez auta (žádný chassis rám) kameru nehýbeme.
     let Some(cf) = &sb.chassis else { return };
-    let Ok(mut cam) = camera.get_single_mut() else { return };
+    let Ok((mut cam, _)) = camera.get_single_mut() else { return };
     let mean = |idx: &[usize]| idx.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / idx.len() as f32;
 
     let center = (mean(&cf.front) + mean(&cf.rear)) * 0.5; // těžiště rámu

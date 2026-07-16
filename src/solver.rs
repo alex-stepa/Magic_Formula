@@ -21,6 +21,7 @@ pub struct SoftBody {
     pub entities: Vec<Entity>, // node index i ↔ render entita (zápis Transformu)
     pub substeps: u32,         // kolik integračních kroků na snímek (adaptivně dle nejtužšího beamu)
     pub chassis: Option<ChassisFrame>, // referenční nody pro směr auta (None u .veh — nemá kola)
+    pub from_veh: bool,        // auto z .veh — menu dílů (SetSuspension) ho nepřestavuje
 }
 
 // Referenční nody těla, ze kterých solver dopočítá dopředný/boční směr auta (yaw rámu).
@@ -40,6 +41,25 @@ pub struct BeamC {
     pub rest: f32, // klidová délka
     pub k: f32,    // tuhost (bez škálování)
     pub d: f32,    // tlumení
+    // Dorazy zdvihu (bump stop / odskok): mimo <min, max> délku nastoupí dorazová
+    // pružina stop_k NAVÍC ke k. stop_k = 0 → beam bez dorazů (default).
+    pub min: f32,
+    pub max: f32,
+    pub stop_k: f32,
+}
+
+// Síla pružiny beamu vč. dorazů, kladná = přitahuje (čistá funkce kvůli testu).
+// Doraz je jen tužší pružina od prahu — spojitá síla, žádný skok (stabilita).
+pub fn beam_spring_force(beam: &BeamC, len: f32) -> f32 {
+    let mut s = beam.k * (len - beam.rest);
+    if beam.stop_k > 0.0 {
+        if len < beam.min {
+            s += beam.stop_k * (len - beam.min); // stlačeno pod doraz → tlačí od sebe
+        } else if len > beam.max {
+            s += beam.stop_k * (len - beam.max); // nataženo přes odskok → táhne zpět
+        }
+    }
+    s
 }
 
 // --- KOLA NA SOLVERU (jednotný model: kolo = node v SoftBody s bohatším kontaktem) ---
@@ -105,6 +125,9 @@ pub const DAMPING_RATIO: f32 = 0.25;
 // Koeficient tření pneumatika↔zem. Strop celkové vodorovné síly = MU·Fz (kruh adheze):
 // víc, než drží guma, nedá podélnou ani boční sílu (skluz/smyk).
 pub const MU: f32 = 1.0;
+// Max stlačení pneumatiky (metry) — pak „ráfek": tvrdá projekce nad terén. Boční stěna
+// 175/65R14 má ~11 cm, plné sražení už je náraz do ráfku; ~70 % je realistický strop.
+pub const TIRE_MAX_SQUASH: f32 = 0.08;
 
 // --- DRIVETRAIN ---
 // Part-shaped (připraveno na build systém): DÍLY jsou datové structy, RESOURCE drží,
@@ -140,6 +163,9 @@ impl SoftBody {
             rest: (self.pos[i] - self.pos[j]).length(),
             k,
             d,
+            min: 0.0,
+            max: f32::INFINITY,
+            stop_k: 0.0,
         });
     }
 
@@ -148,8 +174,10 @@ impl SoftBody {
     pub fn compute_substeps(&mut self) {
         let mut k_sum = vec![0.0_f32; self.pos.len()];
         for beam in &self.beams {
-            k_sum[beam.i] += beam.k;
-            k_sum[beam.j] += beam.k;
+            // + stop_k: na dorazu je efektivní tuhost k+stop_k — substepy musí stačit
+            // i v tom stavu, jinak dopad na doraz exploduje
+            k_sum[beam.i] += beam.k + beam.stop_k;
+            k_sum[beam.j] += beam.k + beam.stop_k;
         }
         let mut max_w2 = 0.0_f32;
         for i in 0..self.pos.len() {
@@ -164,6 +192,26 @@ impl SoftBody {
         } else {
             1
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bump_stop_engages_outside_travel() {
+        let b = BeamC { i: 0, j: 1, rest: 0.5, k: 20_000.0, d: 0.0, min: 0.44, max: 0.56, stop_k: 200_000.0 };
+        let close = |a: f32, b: f32| (a - b).abs() < 0.1; // floaty: tolerance 0.1 N
+        assert!(close(beam_spring_force(&b, 0.5), 0.0)); // klid
+        assert!(close(beam_spring_force(&b, 0.45), 20_000.0 * -0.05)); // ve zdvihu: jen pružina
+        // na dorazu (0.42 < min): pružina + doraz tlačí od sebe (záporná = odpuzuje)
+        assert!(close(beam_spring_force(&b, 0.42), 20_000.0 * -0.08 + 200_000.0 * -0.02));
+        // přes odskok (0.58 > max): táhne zpět (kladná = přitahuje)
+        assert!(close(beam_spring_force(&b, 0.58), 20_000.0 * 0.08 + 200_000.0 * 0.02));
+        // bez dorazů (stop_k = 0) žádný zlom
+        let plain = BeamC { stop_k: 0.0, ..b };
+        assert!(close(beam_spring_force(&plain, 0.42), 20_000.0 * -0.08));
     }
 }
 
@@ -206,7 +254,7 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
                 continue; // zdegenerovaný beam → nedělitelný směr
             }
             let dir = delta / len;
-            let spring = beam.k * (len - beam.rest);
+            let spring = beam_spring_force(beam, len);
             let rel_v = (sb.vel[beam.j] - sb.vel[beam.i]).dot(dir);
             let f = (spring + beam.d * rel_v) * dir;
             sb.force[beam.i] += f; // přitahuje i k j
@@ -245,7 +293,19 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
             // ~20° je chyba proti měření podél normály zanedbatelná).
             let h = world.height(sb.pos[hub].x, sb.pos[hub].z);
             let n = world.normal(sb.pos[hub].x, sb.pos[hub].z);
-            let pen = (h + radius) - sb.pos[hub].y; // >0 = pneumatika stlačená
+            let mut pen = (h + radius) - sb.pos[hub].y; // >0 = pneumatika stlačená
+            // Tvrdý strop průniku (jako projekce nodů nad terén): rychlý nájezd do svahu
+            // pružina nezbrzdí a kolo by se viditelně propadlo do terénu. Přes
+            // TIRE_MAX_SQUASH už guma nemá kam — dál je „ráfek": poloha + útlum dopadu.
+            let max_pen = TIRE_MAX_SQUASH.min(0.5 * radius); // .min: pojistka pro mini kola
+            if pen > max_pen {
+                sb.pos[hub].y = h + radius - max_pen;
+                pen = max_pen;
+                let vn = sb.vel[hub].dot(n);
+                if vn < 0.0 {
+                    sb.vel[hub] -= vn * n; // nepružná zem — žádný odraz navíc
+                }
+            }
             let mut f_long = 0.0; // reakce zpět na spin (mimo zem = 0)
             if pen > 0.0 {
                 let fy = ns * pen - nd * sb.vel[hub].dot(n); // pružina podél normály − tlumení
