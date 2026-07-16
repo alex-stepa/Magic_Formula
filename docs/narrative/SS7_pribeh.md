@@ -148,9 +148,11 @@ synem, co o otcově rallye minulosti nikdy nic nevěděli.
 8. **Nedoručená pohlednice** — orazítkovaná v Rakousku, adresovaná
    Vrbově matce, zabavená.
 9. **Rozhovor #2 — Petr Holoubek** (hlavní scéna aktu 3, dlouhá,
-   vícedílná, s pauzami/odmlkami jako součást psaní dialogu).
+   vícedílná, s pauzami/odmlkami jako součást psaní dialogu). Plné
+   znění: [`SS7_holoubek_rozhovor.md`](SS7_holoubek_rozhovor.md).
 10. **Závěrečný artefakt** — matrika/nekrolog/fotka/kontakt s potomkem —
     varianta podle toho, jak moc hráč v aktu 3 tlačil na Holoubka.
+    Plné znění variant: [`SS7_zaver_varianty.md`](SS7_zaver_varianty.md).
 
 ---
 
