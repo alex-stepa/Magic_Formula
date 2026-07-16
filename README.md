@@ -202,6 +202,11 @@ Order of next steps:
 
 ### Phase 5 — Game modes
 - Freeroam, rally checkpoints + timer, ghost replay
+- **SS7 — narrative archive mode**: standalone investigation mode, fully isolated
+  from the node-beam solver / drivetrain / tire model (shares render + optionally
+  `world.rs` only). See [`docs/narrative/SS7_pribeh.md`](docs/narrative/SS7_pribeh.md)
+  (story) and [`docs/narrative/SS7_technicka.md`](docs/narrative/SS7_technicka.md)
+  (technical plan).
 
 ### Phase 6 — Steam
 - Steam Direct, achievements, leaderboards, Workshop for custom `.veh`
