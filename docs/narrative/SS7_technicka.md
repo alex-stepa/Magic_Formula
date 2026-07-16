@@ -142,40 +142,76 @@ Volitelně, pokud se ukáže potřeba: jednoduchá **evidence board**
 obrazovka (seznam nalezených dokumentů, žádné propojování myší — to by
 byl samostatný scope navíc, zatím zbytečný).
 
-## 5. Pohyb mezi lokacemi
+## 5. Žánr a pohyb — walking-sim hybrid
 
-Nejjednodušší varianta na start: **žádné auto, přímý výběr lokace**
-(mapa/seznam bodů, klik → načte scénu). Auto jako doprava je hezký
-detail, ale není nutný pro první průchod (akt 1) a přidává závislost na
-`world.rs`. Navrhovaný postup:
+Rozhodnuto: ani čistá visual novel (žádný pohyb, jen textbox), ani RPG
+(volná mapa, inventář, boj) — ani jedno nesedí na to, co engine umí a co
+příběh potřebuje.
 
-1. **V1 (vertikální řez aktu 1):** lokace = statická scéna + dokument/
-   dialog, přechod mezi nimi přes menu, žádné řízení vozidla.
-2. **V2 (pokud to atmosféře pomůže):** jednoduchý walk/drive controller
-   nezávislý na `SoftBody` — kinematický pohyb (`Transform` posouvaný
-   přímo podle vstupu, žádná fyzika), případně nad `Terrain` z
-   `world.rs` pro výšku terénu pod koly. Žádný Pacejka, žádné beamy.
+**Zvolený přístup:** malé, uzavřené 3D lokace s kinematickým pohybem
+(chůze, žádná fyzika, žádný `SoftBody`) + **trigger zóny** na
+artefaktech/postavách, které přepnou hru do 2D overlay (document viewer
+nebo dialogue box — viz sekce 4). Blízké analogii: Firewatch/Tacoma
+styl — chůze je prostředek najít obsah, ne systém sám o sobě.
 
-Rozhodnutí V1 vs. V2 odložit, dokud nebude hotový obsah aktu 1 — psaní
-dokumentů a dialogů je větší část práce než přesun mezi scénami.
+### Trigger zóny
+
+Prostě sféra/AABB kolem artefaktu + vzdálenostní kontrola vůči hráčově
+`Transform` — nepotřebuješ rapier pro tohle, kinematický pohyb +
+`Vec3::distance` v systému stačí. Když je hráč v dosahu, zobrazí se
+krátký prompt (E — prohlédnout); potvrzení spustí přechod do overlay.
+
+```rust
+#[derive(Component)]
+struct Interactable {
+    radius: f32,
+    action: InteractAction, // ShowDocument(DocumentId) / StartDialogue(DialogueId)
+}
+```
+
+### Přechod scéna → overlay → scéna
+
+Overlay (document viewer / dialogue box) se nepřepíná přes `AppState`
+— to je zbytečně těžké pro dočasné UI. Stačí lokální resource/flag
+uvnitř `archive` modulu (např. `ArchiveUiMode::Walking / ::Document(DocumentId)
+/ ::Dialogue(DialogueId)`), který:
+
+- zastaví pohybový systém (`walk_controller.run_if(...Walking)`),
+- zobrazí příslušné UI přes existující scénu (ne novou scénu — hráč se
+  vrátí přesně tam, kde stál),
+- na zavření (klávesa/tlačítko) se vrátí do `::Walking`.
+
+### Rozsah lokací
+
+Každá lokace z `SS7_pribeh.md` (Vlčí důl, archiv, Holoubkova zahrada,
+…) je malá samostatná scéna — pár desítek metrů, žádné velké otevřené
+prostory. Přechod mezi lokacemi zůstává přes jednoduché menu (výběr
+bodu), ne souvislý svět.
 
 ## 6. Pořadí implementace (návrh)
 
 1. `AppState` enum + gate existujících Rally systémů + prázdná `Archive`
    scéna (jen aby se dalo přepnout a vidět černou obrazovku).
 2. `Investigation` resource (prázdný, jen kostra).
-3. `DocumentDef` + loader z `.ron`, `document_viewer` UI systém — natvrdo
-   3 dokumenty z aktu 1 (výsledková listina, přihláška, výstřižek).
-4. `DialogueLine` systém — jeden krátký rozhovor (mechanik, akt 1) jako
+3. Jedna malá testovací lokace: kinematický `walk_controller` (WASD,
+   žádná fyzika) + jeden `Interactable` s prompt UI — ověření, že
+   chůze + trigger zóna funguje, než přijde obsah.
+4. `ArchiveUiMode` (Walking/Document/Dialogue) + `document_viewer`
+   overlay — natvrdo 3 dokumenty z aktu 1 (výsledková listina,
+   přihláška, výstřižek), napojené na `Interactable` z kroku 3.
+5. `DialogueLine` systém — jeden krátký rozhovor (mechanik, akt 1) jako
    ověření, že větvení/flagy fungují.
-5. Doplnit zbytek aktu 1 → akt 2 dokumenty → akt 3 (Holoubek, nejdelší
-   dialog) → závěrečné artefakty podle `holoubek_pressure`.
-6. Až funguje celý obsahový tok: audio (nahrávky), lepší UI, případně
-   pohyb mezi lokacemi (V2).
+6. Doplnit zbytek aktu 1 → akt 2 dokumenty → akt 3 (Holoubek, nejdelší
+   dialog) → závěrečné artefakty podle `holoubek_pressure`. Další
+   lokace se přidávají jako kopie stejného vzoru (malá scéna +
+   `Interactable` body).
+7. Až funguje celý obsahový tok: audio (nahrávky), lepší UI, jemnější
+   pohyb/kamera.
 
-Krok 1–4 je smysluplný vertikální řez — po něm uvidíš, jestli datový
-formát (`.ron` dokumenty, `DialogueLine`) sedí na psaní zbytku obsahu,
-než napíšeš všech 10 dokumentů a dlouhý Holoubkův rozhovor.
+Krok 1–5 je smysluplný vertikální řez — po něm uvidíš, jestli walking +
+trigger + overlay smyčka (sekce 5) a datový formát (`.ron` dokumenty,
+`DialogueLine`) sedí na psaní zbytku obsahu, než napíšeš všech 10
+dokumentů a dlouhý Holoubkův rozhovor.
 
 ## 7. Co záměrně NENÍ v scope (zatím)
 
