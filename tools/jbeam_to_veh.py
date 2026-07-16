@@ -1,7 +1,7 @@
 # jbeam → .veh konvertor — replika logiky jbeam2veh (main.rs + jbeam.rs).
 # SJSON parser zkopírován z "Beam proto2/tools/jbeam_to_toml.py" (import nejde —
 # skript má top-level kód, co hned konvertuje).
-import sys, json, os
+import sys, json, os, math, re
 
 def tokenize(s):
     i, n = 0, len(s); toks = []
@@ -68,7 +68,7 @@ def select_parts(parts):
     main = next((n for n, p in parts.items() if p.get("slotType") == "main"), None)
     if main is None:
         print("žádný part se slotType=main — beru všechny (staré chování)", file=sys.stderr)
-        return list(parts.keys())
+        return list(parts.keys()), {}
     # index slotType → jména partů (fallback, když výchozí part chybí — je v BeamNG
     # common obsahu mimo mod; vezmeme první part modu se stejným slotType)
     by_type = {}
@@ -76,10 +76,12 @@ def select_parts(parts):
         st = p.get("slotType")
         if isinstance(st, str):
             by_type.setdefault(st, []).append(n)
-    chosen, queue, missing = [], [(None, main)], []
+    # offsets: part → nodeOffset ze slot řádku, co ho obsadil (posun nodů partu —
+    # takhle BeamNG umísťuje kola: wheel part má lokální souřadnice, offset je na slotu)
+    chosen, queue, missing, offsets = [], [(None, main, None)], [], {}
     seen = set()
     while queue:
-        slot_type, name = queue.pop(0)
+        slot_type, name, off = queue.pop(0)
         if name not in parts:
             alts = sorted(by_type.get(slot_type, []))
             if alts:
@@ -92,23 +94,65 @@ def select_parts(parts):
             continue
         seen.add(name)
         chosen.append(name)
+        if isinstance(off, dict):
+            offsets[name] = off
         rows = parts[name].get("slots")
         if not isinstance(rows, list):
             continue
         for row in rows[1:]:
             if isinstance(row, list) and len(row) >= 2 and isinstance(row[0], str) and isinstance(row[1], str) and row[1]:
-                queue.append((row[0], row[1]))
+                mods = row[3] if len(row) >= 4 and isinstance(row[3], dict) else {}
+                queue.append((row[0], row[1], mods.get("nodeOffset")))
     if missing:
         print(f"chybějící party bez náhrady (přeskočeny): {missing}", file=sys.stderr)
-    return chosen
+    return chosen, offsets
 
-def extract(root):
+# Hodnota z jbeam: float rovnou; "$x" → default proměnné; "$=výraz" → mini-eval.
+# Výrazy v datech: case(a,b,c), aritmetika, == nil, '' jako nil. Neznámé → None (ignoruj).
+def resolve(val, jvars):
+    if isinstance(val, float):
+        return val
+    if not isinstance(val, str):
+        return None
+    if val.startswith("$="):
+        expr = val[2:]
+    elif val.startswith("$"):
+        return jvars.get(val[1:])
+    else:
+        return None
+    expr = expr.replace("nil", "None").replace("''", "None")
+    expr = re.sub(r"\$(\w+)", lambda m: repr(jvars.get(m.group(1))), expr)
+    try:
+        v = eval(expr, {"__builtins__": {}, "case": lambda c, a, b: a if c else b, "None": None}, {})
+        return v if isinstance(v, float) else None
+    except Exception:
+        return None
+
+def extract(root, offsets={}):
     nodes, beams, wheels, tris = [], [], [], []
+    engine, gearbox, axles = None, {}, set()
+    node_off = {}  # node id → nodeOffset partu (střed kola; wheel part má nody lokálně)
     if not isinstance(root, dict):
-        return nodes, beams, wheels, tris
+        return nodes, beams, wheels, tris, engine, gearbox, axles
+    # Prepass: defaulty proměnných ze sekcí "variables" všech partů (řádek: [name, type,
+    # unit, category, default, min, max, …]). Tuning party je mění, ale ty sloty neobsazují.
+    jvars = {}
     for part in root.values():
+        rows = part.get("variables") if isinstance(part, dict) else None
+        if isinstance(rows, list):
+            for row in rows[1:]:
+                if isinstance(row, list) and len(row) >= 5 and isinstance(row[0], str):
+                    jvars[row[0].lstrip("$")] = row[4]
+    for pname, part in root.items():
         if not isinstance(part, dict):
             continue
+        # nodeOffset ze slotu, co part obsadil: y/z floaty = použitelný střed,
+        # x bývá $výraz (rozchod) → nečitelné = 0, hra si stranu odvodí sama
+        off = offsets.get(pname, {})
+        center = None
+        if isinstance(off.get("y"), float) and isinstance(off.get("z"), float):
+            x = off.get("x")
+            center = [x if isinstance(x, float) else 0.0, off["y"], off["z"]]
         # NODY: modifikátor {nodeWeight} platí pro následující řádky (stavový automat)
         rows = part.get("nodes")
         if isinstance(rows, list):
@@ -122,21 +166,31 @@ def extract(root):
                     continue
                 if len(row) >= 4 and isinstance(row[0], str) and all(isinstance(v, float) for v in row[1:4]):
                     nodes.append({"id": row[0], "pos": [row[1], row[2], row[3]], "mass": mass})
-        # BEAMY: modifikátory {beamSpring/beamDamp} stavově, inline {…} v řádku se ignorují
+                    if center:
+                        node_off[row[0]] = center
+        # BEAMY: modifikátory {beamSpring/beamDamp/…} stavově + inline {…} v řádku (jen pro
+        # ten řádek). Hodnoty umí být "$proměnná" nebo "$=výraz" → resolve. Předpětí
+        # (beamPrecompression poměr / precompressionRange metry) se přepočte na rest níž.
         rows = part.get("beams")
         if isinstance(rows, list):
-            k, d = 0.0, 0.0
+            k, d, pre = 0.0, 0.0, 1.0
             for row in rows[1:]:
                 if isinstance(row, dict):
-                    if isinstance(row.get("beamSpring"), float):
-                        k = row["beamSpring"]
-                    if isinstance(row.get("beamDamp"), float):
-                        d = row["beamDamp"]
+                    k = resolve(row.get("beamSpring"), jvars) if "beamSpring" in row else k
+                    d = resolve(row.get("beamDamp"), jvars) if "beamDamp" in row else d
+                    pre = resolve(row.get("beamPrecompression"), jvars) if "beamPrecompression" in row else pre
                     continue
                 if not isinstance(row, list):
                     continue
                 if len(row) >= 2 and isinstance(row[0], str) and isinstance(row[1], str):
-                    beams.append({"a": row[0], "b": row[1], "stiffness": k, "damping": d})
+                    inline = row[2] if len(row) > 2 and isinstance(row[2], dict) else {}
+                    ki = resolve(inline.get("beamSpring"), jvars) if "beamSpring" in inline else k
+                    di = resolve(inline.get("beamDamp"), jvars) if "beamDamp" in inline else d
+                    pi = resolve(inline.get("beamPrecompression"), jvars) if "beamPrecompression" in inline else pre
+                    # range (metry) jen inline — v datech se stavově nepoužívá; přebíjí poměr
+                    ri = resolve(inline.get("precompressionRange"), jvars)
+                    beams.append({"a": row[0], "b": row[1], "stiffness": ki or 0.0, "damping": di or 0.0,
+                                  "_pre": pi, "_rng": ri})
         # KOLA: pressureWheels, sloupce 0/3/4/7 = name/node1/node2/wheelDir.
         # Modifikátory radius/tireWidth stavově (jako beamSpring) — tenhle mod je nemá
         # (tire party jsou v BeamNG common obsahu), pak zůstane 0 a hra si dá fallback.
@@ -161,7 +215,57 @@ def extract(root):
             for row in rows[1:]:
                 if isinstance(row, list) and len(row) >= 3 and all(isinstance(v, str) for v in row[:3]):
                     tris.append({"a": row[0], "b": row[1], "c": row[2]})
-    return nodes, beams, wheels, tris
+        # MOTOR: sekce "mainEngine" — torque tabulka [rpm, Nm] (bez hlavičky), volnoběh, omezovač
+        # (sekci mainEngine mají i tuning party — ECU — jen s modifikátory;
+        # motor je jen part s torque tabulkou, jinak by poslední part data smazal)
+        me = part.get("mainEngine")
+        if isinstance(me, dict) and isinstance(me.get("torque"), list):
+            curve = [[r[0], r[1]] for r in me["torque"][1:]
+                     if isinstance(r, list) and len(r) >= 2 and all(isinstance(v, float) for v in r[:2])]
+            if curve:
+                engine = {"torque_curve": curve,
+                          "idle_rpm": me.get("idleRPM", 800.0),
+                          "max_rpm": me.get("maxRPM", 7000.0)}
+        # PŘEVODOVKA: sekce "gearbox" — gearRatios[0]=zpátečka, [1]=neutrál → bereme jen dopředné
+        gb = part.get("gearbox")
+        if isinstance(gb, dict) and isinstance(gb.get("gearRatios"), list):
+            gearbox["ratios"] = [r for r in gb["gearRatios"][2:] if isinstance(r, float)]
+        # FINÁL: kterákoli sekce partu s float "gearRatio" (finaldrive party) — poslední vyhrává.
+        # String hodnoty ("$finaldrive_F" = jbeam proměnná) se přeskočí.
+        for sec in part.values():
+            if isinstance(sec, dict) and isinstance(sec.get("gearRatio"), float):
+                gearbox["final_drive"] = sec["gearRatio"]
+        # POHON: powertrain řádky ["differential", "differential_F", …] = hnané osy.
+        # Center diff / transfercase se jmenuje jinak → nevadí, stačí F/R nápravy.
+        rows = part.get("powertrain")
+        if isinstance(rows, list):
+            for row in rows[1:]:
+                if isinstance(row, list) and len(row) >= 2 and row[0] == "differential" and isinstance(row[1], str):
+                    if row[1].endswith("_F"):
+                        axles.add("F")
+                    if row[1].endswith("_R"):
+                        axles.add("R")
+    # Střed kola = nodeOffset partu, kterému patří jeho axle nody (pressureWheels
+    # bývají v jiném partu — wheeldata — než nody kola).
+    for w in wheels:
+        c = node_off.get(w["node1"]) or node_off.get(w["node2"])
+        if c:
+            w["center"] = c
+    # Předpětí → klidová délka beamu (pružiny drží statickou zátěž jen díky němu).
+    # precompressionRange = metry navíc k délce; beamPrecompression = poměr délky.
+    # Až tady — beam smí odkazovat na nody z partu zpracovaného později.
+    posd = {n["id"]: n["pos"] for n in nodes}
+    for b in beams:
+        pre, rng = b.pop("_pre", None), b.pop("_rng", None)
+        pa, pb = posd.get(b["a"]), posd.get(b["b"])
+        if pa is None or pb is None:
+            continue
+        length = math.dist(pa, pb)
+        if isinstance(rng, float) and rng != 0.0:
+            b["rest"] = round(length + rng, 6)
+        elif isinstance(pre, float) and pre != 1.0:
+            b["rest"] = round(length * pre, 6)
+    return nodes, beams, wheels, tris, engine, gearbox, axles
 
 def main():
     src_dir, out_path, name = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -179,10 +283,10 @@ def main():
                 if isinstance(part, dict):
                     parts[pname] = part
     # 2) sloty: vyber jen party dosažitelné z hlavního partu přes výchozí hodnoty slotů
-    chosen = select_parts(parts)
+    chosen, offsets = select_parts(parts)
     print(f"party: {len(parts)} celkem → {len(chosen)} vybraných sloty", file=sys.stderr)
     # 3) extrakce jen z vybraných partů
-    nodes, beams, wheels, tris = extract({n: parts[n] for n in chosen})
+    nodes, beams, wheels, tris, engine, gearbox, axles = extract({n: parts[n] for n in chosen}, offsets)
     # dedup nodů podle id — poslední definice vyhrává (override jako v BeamNG)
     before = len(nodes)
     by_id = {}
@@ -191,6 +295,18 @@ def main():
     nodes = list(by_id.values())
     print(f"nody: {before} → {len(nodes)} po deduplikaci", file=sys.stderr)
     vehicle = {"name": name, "version": 1, "nodes": nodes, "beams": beams, "wheels": wheels, "triangles": tris}
+    if engine:
+        vehicle["engine"] = engine
+    if gearbox.get("ratios"):
+        vehicle["gearbox"] = gearbox
+    # Layout = serde externí tag pro hru: "fwd"/"rwd" string, AWD objekt s dělením momentu.
+    if axles == {"F"}:
+        vehicle["layout"] = "fwd"
+    elif axles == {"R"}:
+        vehicle["layout"] = "rwd"
+    elif axles:
+        vehicle["layout"] = {"awd": {"front": 0.5}}  # ponytail: split 50/50, reálný z center diffu až bude potřeba
+    print(f"motor: {'ano' if engine else 'NE'}, převodovka: {gearbox or 'NE'}, pohon: {vehicle.get('layout', 'NE')}", file=sys.stderr)
     with open(out_path, "w") as f:
         json.dump(vehicle, f, indent=1)
     print(f"Hotovo: {len(files)} souborů → {out_path} ({len(nodes)} nodů, {len(beams)} beamů, {len(wheels)} kol, {len(tris)} trojúhelníků)")
