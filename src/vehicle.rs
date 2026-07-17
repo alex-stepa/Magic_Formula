@@ -42,6 +42,9 @@ pub const COIL_DAMP_MULT: f32 = 3.5;
 // Hodnoty dle BeamNG (shortBoundRange ~0.065 m, beamLimitSpring ~200k).
 pub const STOP_TRAVEL: f32 = 0.06;
 pub const STOP_K: f32 = 200_000.0;
+// Rebound tlumení = REBOUND_MULT × bump (jbeam Fabia: 7500/3500 ≈ 2.1). Tužší rebound
+// drží kolo na zemi po nerovnosti — auto se nehoupe („neplave").
+pub const REBOUND_MULT: f32 = 2.0;
 // Stabilizátor (V-nod nad osou): roll napíná ramena V (svislá složka ~0.45 → roll
 // tuhost ~0.2·k na kolo), bounce V-nod jen sveze s koly → žádný odpor. Viz build_antiroll.
 pub const ARB_K: f32 = 100_000.0;
@@ -232,6 +235,7 @@ impl Default for Drivetrain {
 fn finish_spring(sb: &mut SoftBody) {
     let b = sb.beams.last_mut().unwrap();
     b.d *= COIL_DAMP_MULT;
+    b.d_rebound = b.d * REBOUND_MULT; // natahování tlumí tvrději než stlačování
     b.min = b.rest - STOP_TRAVEL;
     b.max = b.rest + STOP_TRAVEL;
     b.stop_k = STOP_K;

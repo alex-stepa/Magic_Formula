@@ -40,7 +40,8 @@ pub struct BeamC {
     pub j: usize,
     pub rest: f32, // klidová délka
     pub k: f32,    // tuhost (bez škálování)
-    pub d: f32,    // tlumení
+    pub d: f32,    // tlumení při stlačování (bump)
+    pub d_rebound: f32, // tlumení při natahování (rebound) — reál má ~2× bump
     // Dorazy zdvihu (bump stop / odskok): mimo <min, max> délku nastoupí dorazová
     // pružina stop_k NAVÍC ke k. stop_k = 0 → beam bez dorazů (default).
     pub min: f32,
@@ -163,6 +164,7 @@ impl SoftBody {
             rest: (self.pos[i] - self.pos[j]).length(),
             k,
             d,
+            d_rebound: d, // default symetrické; asymetrii nastaví builder (finish_spring)
             min: 0.0,
             max: f32::INFINITY,
             stop_k: 0.0,
@@ -201,7 +203,7 @@ mod tests {
 
     #[test]
     fn bump_stop_engages_outside_travel() {
-        let b = BeamC { i: 0, j: 1, rest: 0.5, k: 20_000.0, d: 0.0, min: 0.44, max: 0.56, stop_k: 200_000.0 };
+        let b = BeamC { i: 0, j: 1, rest: 0.5, k: 20_000.0, d: 0.0, d_rebound: 0.0, min: 0.44, max: 0.56, stop_k: 200_000.0 };
         let close = |a: f32, b: f32| (a - b).abs() < 0.1; // floaty: tolerance 0.1 N
         assert!(close(beam_spring_force(&b, 0.5), 0.0)); // klid
         assert!(close(beam_spring_force(&b, 0.45), 20_000.0 * -0.05)); // ve zdvihu: jen pružina
@@ -256,7 +258,9 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
             let dir = delta / len;
             let spring = beam_spring_force(beam, len);
             let rel_v = (sb.vel[beam.j] - sb.vel[beam.i]).dot(dir);
-            let f = (spring + beam.d * rel_v) * dir;
+            // rel_v > 0 = beam se natahuje → rebound tlumení, jinak bump
+            let d = if rel_v > 0.0 { beam.d_rebound } else { beam.d };
+            let f = (spring + d * rel_v) * dir;
             sb.force[beam.i] += f; // přitahuje i k j
             sb.force[beam.j] -= f;
         }
