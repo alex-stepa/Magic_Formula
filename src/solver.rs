@@ -103,7 +103,7 @@ pub struct TireParams {
 // --- LADICÍ HODNOTY PNEUMATIKY (vše na jednom místě) ---
 // Změň čísla a `cargo run` — solver je nesahá, jen čte. D (špička) = MU·Fz dynamicky.
 pub const TIRE_LONG: Pacejka = Pacejka { b: 10.0, c: 1.65, e: 0.97 };
-pub const TIRE_LAT: Pacejka = Pacejka { b: 8.0, c: 1.3, e: 0.97 };
+pub const TIRE_LAT: Pacejka = Pacejka { b: 18.0, c: 1.3, e: 0.97 };
 // Spodní mez referenční rychlosti pro normalizaci skluzu (m/s). Brání dělení nulou
 // při rozjezdu z místa — bez ní κ vystřelí a auto exploduje.
 pub const V_LOW: f32 = 2.0;
