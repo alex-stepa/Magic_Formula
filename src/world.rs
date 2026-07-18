@@ -165,24 +165,54 @@ impl World for HeightField {
     }
 }
 
+// Reálný terén ze SRTM dlaždice (fallback = testovací kopeček, když soubor chybí).
+// SRTM1, 3601×3601, spacing ~30.87 m → dlaždice je 3600×30.87 ≈ 111 km na stranu.
+// Centrujeme na střed dlaždice (polovinu strany v každém směru).
+pub fn real_terrain() -> Box<dyn World> {
+    let half = 1800.0_f32 * 30.87;
+    match HeightField::from_hgt(Path::new("assets/N50E014.hgt"), -half, -half) {
+        Ok(hf) => Box::new(hf),
+        Err(e) => {
+            eprintln!("SRTM chyba: {e}");
+            Box::new(HeightField::test_hill())
+        }
+    }
+}
+
+// Volitelná mapa pro picker. Testovací plocha = rovina (čistá data pro ladění gripu).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MapKind {
+    TestPad, // rovina + testovací dráha (skidpad, rovinka)
+    Hills,   // procedurální kopce
+    Real,    // SRTM heightfield okolí Prahy
+}
+
+impl MapKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            MapKind::TestPad => "Testovací plocha",
+            MapKind::Hills => "Kopce",
+            MapKind::Real => "Reálný terén (SRTM)",
+        }
+    }
+    pub fn build(self) -> Box<dyn World> {
+        match self {
+            MapKind::TestPad => Box::new(FlatWorld),
+            MapKind::Hills => Box::new(Hills::default()),
+            MapKind::Real => real_terrain(),
+        }
+    }
+}
+
 // Aktivní terén jako resource — solver i stavba render meshe čtou přes trait objekt.
 #[derive(Resource)]
 pub struct Terrain(pub Box<dyn World>);
 
 impl Default for Terrain {
+    // Start na testovací ploše — aktuální fáze je ladění gripu, chce rovinu a dráhu.
+    // Kopce/reálný terén jsou na jeden klik v map pickeru.
     fn default() -> Self {
-        // SRTM1, 3601×3601, spacing ~30.87 m → dlaždice je 3600×30.87 ≈ 111 km na stranu.
-        // Centrujeme na střed dlaždice (polovinu strany v každém směru).
-        let half = 1800.0_f32 * 30.87;
-        let hf = HeightField::from_hgt(
-            Path::new("assets/N50E014.hgt"),
-            -half, -half,
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("SRTM chyba: {e}");
-            HeightField::test_hill()
-        });
-        Self(Box::new(hf))
+        Self(MapKind::TestPad.build())
     }
 }
 

@@ -15,7 +15,7 @@ mod world; // terén jako trait (rovina / kopce / časem OSM heightfield)
 
 use solver::*;
 use vehicle::*;
-use world::Terrain;
+use world::{MapKind, Terrain};
 
 fn main() {
     App::new()
@@ -42,7 +42,7 @@ fn main() {
         .add_systems(FixedUpdate, softbody_solve)
         // Update = spustí se každý snímek (reaguje na vstup, zapisuje pozice do meshe).
         // Pořadí: nejdřív řazení + výpočet RPM, pak pohon (čte RPM), pak zbytek.
-        .add_systems(Update, (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, update_hud, camera_control, spawn_buttons, spawn_shortcuts, toggle_menu, highlight_build_buttons, softbody_to_transforms, update_softbody_mesh).chain())
+        .add_systems(Update, (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, telemetry_log, update_hud, camera_control, spawn_buttons, map_buttons, spawn_shortcuts, toggle_menu, highlight_build_buttons, softbody_to_transforms, update_softbody_mesh).chain())
         .run();
 }
 
@@ -69,8 +69,25 @@ fn setup(
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, -0.5, 0.0)),
     ));
 
-    // Zem: mesh terénu (mřížka vzorkuje Terrain) s mřížkovou texturou. FYZIKA jede
-    // z Terrain přímo (height/normal v solveru) a je nekonečná — mesh je jen render.
+    // Zem + (na testovací ploše) testovací dráha. Default mapa = TestPad (viz Terrain::default).
+    spawn_ground(&mut commands, &mut meshes, &mut materials, &mut images, terrain.0.as_ref());
+    build_test_track(&mut commands, &mut meshes, &mut materials);
+
+    // Auto se na startu NEspawnuje — vybereš ho v UI (tlačítka) nebo klávesou 1/2/3.
+    spawn_ui(&mut commands);
+    spawn_hud(&mut commands);
+}
+
+// Zem: mesh terénu (mřížka vzorkuje Terrain) s mřížkovou texturou. FYZIKA jede z Terrain
+// přímo (height/normal v solveru) a je nekonečná — mesh je jen render. Marker GroundMesh:
+// picker ho najde a přestaví. Sdílí setup i map_buttons, ať je konfigurace na jednom místě.
+fn spawn_ground(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    world: &dyn world::World,
+) {
     let ground_size = 4000.0;
     let mesh_step = 8.0; // hustota mřížky meshe (m) — kopce (λ 80 m) vzorkuje ~10× na vlnu
     let cell = 5.0; // velikost jedné buňky mřížkové textury v metrech
@@ -81,13 +98,46 @@ fn setup(
         perceptual_roughness: 0.95,
         ..default()
     });
-    commands
-        .spawn((Mesh3d(meshes.add(world::terrain_mesh(terrain.0.as_ref(), ground_size, mesh_step))), MeshMaterial3d(ground_mat)))
-        .insert(physics::ground_physics());
+    commands.spawn((
+        Mesh3d(meshes.add(world::terrain_mesh(world, ground_size, mesh_step))),
+        MeshMaterial3d(ground_mat),
+        GroundMesh,
+        physics::ground_physics(),
+    ));
+}
 
-    // Auto se na startu NEspawnuje — vybereš ho v UI (tlačítka) nebo klávesou 1/2/3.
-    spawn_ui(&mut commands);
-    spawn_hud(&mut commands);
+// Testovací dráha na rovině: SKIDPAD (kruh značek známého poloměru — jezdíš po něm
+// ustálenou zatáčku a zvyšuješ rychlost, sbírá se boční grip) + ROVINKA (rozjezd/brzdění
+// = podélný grip). Značky jsou jen vizuál (fyzika = plochá zem); poloměr 20 m je „pravda"
+// pro binování dat. Volá se jen na TestPad — proto GROUND_TOP stačí místo world.height.
+fn build_test_track(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
+    let post = meshes.add(Cylinder::new(0.2, 0.6));
+    let orange = materials.add(Color::srgb(0.95, 0.45, 0.05));
+    let y = GROUND_TOP + 0.3; // značka stojí na zemi (půlka výšky nad povrchem)
+    let post_at = |commands: &mut Commands, x: f32, z: f32| {
+        commands.spawn((
+            Mesh3d(post.clone()),
+            MeshMaterial3d(orange.clone()),
+            Transform::from_xyz(x, y, z),
+            TrackProp,
+        ));
+    };
+    // Skidpad: kruh R=20 m okolo spawnu (auto startuje uprostřed → vyjeď a krouži).
+    const SKIDPAD_R: f32 = 20.0;
+    let n = 24;
+    for i in 0..n {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        post_at(commands, SKIDPAD_R * a.cos(), SKIDPAD_R * a.sin());
+    }
+    // Rovinka: pruh značek 40 m východně od skidpadu (ať se nekříží), lane šířky 4 m,
+    // délka 160 m (rozjezd + brzdná zóna). Přejeď k ní pro podélné testy.
+    let lane_x = 40.0;
+    let mut z = -80.0;
+    while z <= 80.0 {
+        post_at(commands, lane_x - 2.0, z);
+        post_at(commands, lane_x + 2.0, z);
+        z += 10.0;
+    }
 }
 
 // Vyrobí dlaždici mřížky: zelená výplň + světlejší čára na dvou okrajích. Sampler je
@@ -165,6 +215,19 @@ struct MenuPanel;
 #[derive(Component)]
 struct HudText;
 
+// Volba mapy v pickeru — vlastní komponenta (ne SpawnAction), řeší ji `map_buttons`.
+#[derive(Component, Clone, Copy)]
+struct MapAction(MapKind);
+
+// Render mesh terénu — podle markeru ho picker najde, smaže a postaví z nové mapy.
+#[derive(Component)]
+struct GroundMesh;
+
+// Značka testovací dráhy (skidpad, rovinka) — žije jen na testovací ploše, picker ji
+// smaže při přepnutí na jinou mapu. Zvlášť od `Spawned` (auta), ať je Backspace nemaže.
+#[derive(Component)]
+struct TrackProp;
+
 // Seznam dostupných .veh souborů ve složce assets (seřazený) — UI i klávesy berou stejný.
 fn available_vehs() -> Vec<std::path::PathBuf> {
     let mut vehs = Vec::new();
@@ -236,6 +299,10 @@ fn spawn_ui(commands: &mut Commands) {
                     spawn_button(panel, &label, SpawnAction::SoftBody(path.to_string_lossy().into_owned()));
                 }
                 spawn_button(panel, "Backspace — Clear (smazat auta)", SpawnAction::Clear);
+                // Map picker: přepnutí terénu (data se ladí na Testovací ploše = rovina + dráha).
+                spawn_map_button(panel, MapKind::TestPad);
+                spawn_map_button(panel, MapKind::Hills);
+                spawn_map_button(panel, MapKind::Real);
             });
         });
 }
@@ -260,6 +327,16 @@ fn toggle_menu(
 
 // Pomocník: jedno tlačítko s popiskem a akcí.
 fn spawn_button(parent: &mut ChildBuilder, label: &str, action: SpawnAction) {
+    spawn_button_with(parent, label, action);
+}
+
+// Tlačítko mapy (nese MapAction místo SpawnAction — jinou akci řeší jiný systém).
+fn spawn_map_button(parent: &mut ChildBuilder, kind: MapKind) {
+    spawn_button_with(parent, &format!("Mapa: {}", kind.label()), MapAction(kind));
+}
+
+// Jádro tlačítka pro libovolnou komponentu-akci (SpawnAction i MapAction).
+fn spawn_button_with(parent: &mut ChildBuilder, label: &str, action: impl Component) {
     parent
         .spawn((
             Button,
@@ -312,6 +389,38 @@ fn spawn_buttons(
                 }
             }
             SpawnAction::Clear => clear_spawned(&mut commands, &spawned, &mut softbody),
+        }
+    }
+}
+
+// Picker mapy: přepne Terrain, přestaví render mesh země a testovací dráhu (jen na
+// TestPad). Auta zůstanou — jen jim „podjede" nový terén (solver čte height/normal
+// z Terrain, takže se dopadem srovnají). Vlastní systém (ne spawn_buttons): má jiné
+// zdroje (Terrain ResMut, Images, dotazy na zem/dráhu) a drží je stranou od aut.
+fn map_buttons(
+    interactions: Query<(&Interaction, &MapAction), (Changed<Interaction>, With<Button>)>,
+    ground: Query<Entity, With<GroundMesh>>,
+    track: Query<Entity, With<TrackProp>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut terrain: ResMut<Terrain>,
+) {
+    for (interaction, MapAction(kind)) in &interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        *terrain = Terrain(kind.build());
+        for e in &ground {
+            commands.entity(e).despawn_recursive(); // starý mesh + collider pryč
+        }
+        spawn_ground(&mut commands, &mut meshes, &mut materials, &mut images, terrain.0.as_ref());
+        for e in &track {
+            commands.entity(e).despawn_recursive(); // dráha jen na TestPad
+        }
+        if *kind == MapKind::TestPad {
+            build_test_track(&mut commands, &mut meshes, &mut materials);
         }
     }
 }
