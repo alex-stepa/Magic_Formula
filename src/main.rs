@@ -36,6 +36,7 @@ fn main() {
         .init_resource::<Drivetrain>()
         .init_resource::<CarBuild>()
         .init_resource::<Terrain>()
+        .init_resource::<Telemetry>()
         .add_systems(Startup, setup)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
         .add_systems(FixedUpdate, softbody_solve)
@@ -456,8 +457,62 @@ fn softbody_to_transforms(
     }
 }
 
+// Telemetrie: log per-kolo dat kontaktu do CSV pro ladění Pacejky. Klávesa T přepíná
+// záznam. Nový soubor telemetry_<epoch>.csv v cwd; drží se writer + čas od startu.
+#[derive(Resource, Default)]
+struct Telemetry {
+    writer: Option<std::io::BufWriter<std::fs::File>>,
+    t: f32,
+}
+
+fn telemetry_log(
+    keys: Res<ButtonInput<KeyCode>>,
+    time: Res<Time>,
+    sb: Res<SoftBody>,
+    dt: Res<Drivetrain>,
+    mut tel: ResMut<Telemetry>,
+) {
+    use std::io::Write;
+    if keys.just_pressed(KeyCode::KeyT) {
+        if tel.writer.is_some() {
+            tel.writer = None; // Drop = flush + zavření souboru
+            info!("Telemetrie: záznam zastaven");
+        } else {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = std::fs::create_dir_all("telemetry"); // složka v projektu (idempotentní)
+            let path = format!("telemetry/telemetry_{stamp}.csv");
+            match std::fs::File::create(&path) {
+                Ok(f) => {
+                    let mut w = std::io::BufWriter::new(f);
+                    let _ = writeln!(w, "t,wheel,front,speed_kmh,fz,slip_ratio,slip_angle_deg,f_long,f_lat");
+                    tel.writer = Some(w);
+                    tel.t = 0.0;
+                    info!("Telemetrie: záznam do {path}");
+                }
+                Err(e) => warn!("Telemetrie: nelze otevřít soubor ({e})"),
+            }
+        }
+    }
+    if tel.writer.is_none() {
+        return;
+    }
+    tel.t += time.delta_secs();
+    let (t, speed) = (tel.t, dt.speed_kmh);
+    // Kola nakopírovat před půjčením writeru (ResMut vs Res<SoftBody> jsou nezávislé).
+    let rows: Vec<_> = sb.wheels.iter().enumerate()
+        .map(|(i, w)| (i, w.front, w.telem)).collect();
+    let w = tel.writer.as_mut().unwrap();
+    for (i, front, tm) in rows {
+        let _ = writeln!(w, "{t:.3},{i},{},{speed:.2},{:.1},{:.4},{:.3},{:.1},{:.1}",
+            front as u8, tm.fz, tm.slip_ratio, tm.slip_angle.to_degrees(), tm.f_long, tm.f_lat);
+    }
+}
+
 // Přepíše HUD text aktuálními hodnotami z Drivetrain.
-fn update_hud(dt: Res<Drivetrain>, mut hud: Query<&mut Text, With<HudText>>) {
+fn update_hud(dt: Res<Drivetrain>, sb: Res<SoftBody>, tel: Res<Telemetry>, mut hud: Query<&mut Text, With<HudText>>) {
     let gear = match dt.gear {
         -1 => "R".to_string(),
         0 => "N".to_string(),
@@ -471,9 +526,19 @@ fn update_hud(dt: Res<Drivetrain>, mut hud: Query<&mut Text, With<HudText>>) {
     } else {
         ""
     };
+    // Telemetrie: přední kola slip angle (°) + Fz (N) pro živý pohled při ladění.
+    let front: Vec<_> = sb.wheels.iter().filter(|w| w.front).collect();
+    let slip_line = if front.is_empty() {
+        String::new()
+    } else {
+        let sa = front.iter().map(|w| w.telem.slip_angle.to_degrees()).sum::<f32>() / front.len() as f32;
+        let fz = front.iter().map(|w| w.telem.fz).sum::<f32>();
+        let rec = if tel.writer.is_some() { "  ● REC" } else { "" };
+        format!("\náz {sa:>4.1}°  Fz {fz:>5.0} N{rec}")
+    };
     if let Ok(mut text) = hud.get_single_mut() {
         text.0 = format!(
-            "{:>3.0} km/h\nKvalt {}{clutch}\n{:>5.0} ot/min\n{}  diff: {}",
+            "{:>3.0} km/h\nKvalt {}{clutch}\n{:>5.0} ot/min\n{}  diff: {}{slip_line}",
             dt.speed_kmh, gear, dt.rpm, dt.layout.label(), diff
         );
     }

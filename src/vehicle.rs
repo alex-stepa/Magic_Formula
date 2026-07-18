@@ -501,6 +501,7 @@ pub fn spawn_solver_car(
             front,
             steered,
             tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
+            telem: WheelTelem::default(),
         });
     }
 
@@ -714,6 +715,7 @@ pub fn spawn_softbody(
             front,
             steered: front, // přední = řízená (A4 to případně doladí)
             tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
+            telem: WheelTelem::default(),
         });
     }
 
@@ -910,6 +912,7 @@ pub fn vehicle_drive(
 
 // Řízení: A/D natáčí přední kola kolem svislé osy. Plynule lerpne k cíli (ne skokem),
 // ať řízení nešvihne. Solver z `wheel.steer` odvodí směr pneumatiky (sekce 2.6).
+// Feel (úhel dle rychlosti, Ackermann, samovracení) až s volantem/ovladačem.
 pub fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut sb: ResMut<SoftBody>) {
     let max_angle = 0.5; // ~28°
     let mut target = 0.0;

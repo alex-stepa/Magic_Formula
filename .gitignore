@@ -2,3 +2,6 @@ target/
 *.zip
 *.hgt
 assets/fabia.veh
+
+# telemetrie z ladění (per-jízda CSV)
+telemetry/

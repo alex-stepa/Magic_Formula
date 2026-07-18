@@ -80,6 +80,18 @@ pub struct WheelC {
     pub front: bool,       // je na PŘEDNÍ ose? (pohon rozhoduje DriveLayout, ne kolo samo)
     pub steered: bool,     // natáčí se s ním?
     pub tire: TireParams,  // model pneumatiky — izolovaná data, ať jde vyměnit za Pacejku
+    pub telem: WheelTelem, // poslední hodnoty kontaktu (jen čtení pro HUD/log, solver je píše)
+}
+
+// Telemetrie kola za poslední substep — pro HUD a CSV log při ladění gripu.
+// Nepočítá nic; jen okno do toho, co tire model uvnitř solveru dělá.
+#[derive(Clone, Copy, Default)]
+pub struct WheelTelem {
+    pub fz: f32,          // normálová síla (N); 0 = kolo ve vzduchu
+    pub slip_ratio: f32,  // podélný skluz κ
+    pub slip_angle: f32,  // boční skluz α (rad)
+    pub f_long: f32,      // podélná síla pneumatiky (N)
+    pub f_lat: f32,       // boční síla pneumatiky (N)
 }
 
 // Koeficienty Magic Formula (Pacejka) pro jednu osu (podélnou nebo boční).
@@ -311,6 +323,7 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
                 }
             }
             let mut f_long = 0.0; // reakce zpět na spin (mimo zem = 0)
+            let mut telem = WheelTelem::default(); // ve vzduchu zůstanou nuly
             if pen > 0.0 {
                 let fy = ns * pen - nd * sb.vel[hub].dot(n); // pružina podél normály − tlumení
                 if fy > 0.0 {
@@ -354,8 +367,10 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
                     }
                     sb.force[hub] += fl * wf + fc * wl;
                     f_long = fl;
+                    telem = WheelTelem { fz: fy, slip_ratio: kappa, slip_angle: alpha, f_long: fl, f_lat: fc };
                 }
             }
+            sb.wheels[wi].telem = telem;
 
             // -- dynamika otáčení kola: motor + brzda − reakce od podélné síly --
             let spin_vel = sb.wheels[wi].spin_vel;
