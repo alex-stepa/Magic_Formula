@@ -97,7 +97,13 @@ pub fn respawn_car(
 ) {
     crate::clear_spawned(commands, spawned, softbody);
     let ground_y = terrain.0.height(0.0, 0.0);
-    crate::vehicle::spawn_solver_car(commands, meshes, materials, softbody, drivetrain, build, ground_y);
+    match build.car {
+        crate::vehicle::CarChoice::Veh(i) if crate::available_vehs().get(i).is_some() => {
+            let path = crate::available_vehs()[i].to_string_lossy().into_owned();
+            crate::vehicle::spawn_softbody(commands, meshes, materials, softbody, drivetrain, &path, ground_y);
+        }
+        _ => crate::vehicle::spawn_solver_car(commands, meshes, materials, softbody, drivetrain, build, ground_y),
+    }
 }
 
 // ── Plugin ───────────────────────────────────────────────────────────────────

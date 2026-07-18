@@ -100,17 +100,26 @@ impl SuspensionKind {
     }
 }
 
-// Build config = jaké DÍLY auto má. Menu píše sem, spawn_solver_car čte → výměna dílu
+// Vybrané auto: vestavěný testovací vůz, nebo n-tý .veh soubor z assets
+// (index do seznamu available_vehs — dnes jen fabia).
+#[derive(Clone, Copy, PartialEq)]
+pub enum CarChoice {
+    TestCar,
+    Veh(usize),
+}
+
+// Build config = jaké DÍLY auto má. Garáž píše sem, spawn čte → výměna dílu
 // bez zásahu do solveru (stejný vzor jako Drivetrain: díl = data, resource drží volbu).
-// Zatím jen zavěšení; motor/převodovka žijí v Drivetrain, časem se sem sloučí.
+// Zatím auto + zavěšení; motor/převodovka žijí v Drivetrain, časem se sem sloučí.
 #[derive(Resource)]
 pub struct CarBuild {
+    pub car: CarChoice,
     pub suspension: SuspensionKind,
 }
 
 impl Default for CarBuild {
     fn default() -> Self {
-        Self { suspension: SuspensionKind::COIL }
+        Self { car: CarChoice::TestCar, suspension: SuspensionKind::COIL }
     }
 }
 
