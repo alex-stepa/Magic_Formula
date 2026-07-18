@@ -83,6 +83,23 @@ pub fn txt(s: impl Into<String>, font: &Handle<Font>, size: f32, color: Color) -
     )
 }
 
+// Smaže stojící auto a spawne nové podle CarBuild (Volná jízda / Vyjet z garáže).
+#[allow(clippy::too_many_arguments)] // parametry = to, co potřebuje spawn_solver_car
+pub fn respawn_car(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    softbody: &mut crate::solver::SoftBody,
+    drivetrain: &mut crate::vehicle::Drivetrain,
+    build: &crate::vehicle::CarBuild,
+    terrain: &crate::world::Terrain,
+    spawned: &Query<Entity, With<crate::vehicle::Spawned>>,
+) {
+    crate::clear_spawned(commands, spawned, softbody);
+    let ground_y = terrain.0.height(0.0, 0.0);
+    crate::vehicle::spawn_solver_car(commands, meshes, materials, softbody, drivetrain, build, ground_y);
+}
+
 // ── Plugin ───────────────────────────────────────────────────────────────────
 
 pub struct UiPlugin;
