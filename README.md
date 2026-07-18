@@ -170,27 +170,50 @@ src/
   surface normal, slip directions projected onto the tangent plane. `Hills` = procedural
   rolling hills (flat zone around spawn), render mesh sampled from the terrain → **step D**
 
+### Phase 2.5 — UI/UX (next)
+- [ ] Game HUD: speed, RPM, gear, steering angle
+- [ ] Dev overlay: telemetry live graphs, suspension geometry, forces
+- [ ] Build menu: part picker with live switching
+- [ ] Map picker UI polish
+- [ ] Camera controls cleanup
+
 ### NOT yet
-- ❌ Suspension for `.veh` cars (still `Rigid` + placeholder ride height) → **step B, continuation**
-- ❌ Fully tuned tire model (values being tuned)
-- ❌ Real OSM location, full build system, rally checkpoints, multiplayer
+- ❌ Suspension for `.veh` cars (still `Rigid` + placeholder ride height, **parked**)
+- ❌ Beam precompression gradual application (ponytail: deferred, complex + low ROI)
+- ❌ Per-axle tire balance tuning (both axles same Pacejka now)
+- ❌ Tire temps, wear, temperature dynamics
+- ❌ Real OSM location, rally checkpoints, multiplayer
 
 ---
 
 ## Roadmap
 
-### Phase 2 — Physics (RIGHT NOW)
-Order of next steps:
-- **A) Get the `.veh` car driving** — ✅ done (wheels attached to hub nodes,
-  `ChassisFrame` from node positions).
-- **B) Real suspension** — part 1 ✅ (test car: `Coil` with travel, anti-roll bar,
-  build menu, McPherson, double wishbone + camber). ← **next up:** suspension for
-  `.veh` cars.
-- **C) Drivetrain** — ✅ done (engine with a torque curve + gearbox + diff/AWD
-  + clutch on left Shift, engine as integrated state).
-- **D) Terrain** — ✅ done (`World` trait, procedural hills, normal-based contact,
-  weight transfer on slopes for free). Grid heightfield comes with OSM/SRTM (phase 3).
-- Ongoing: **tire model tuning** (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
+### Phase 2 — Physics ✅ DONE
+- **A) Get the `.veh` car driving** — ✅ done.
+- **B) Real suspension** — ✅ Coil + McPherson + double wishbone with camber;
+  bump stops + asymmetric damping (rebound ~2× bump); per-axle brakes.
+- **C) Drivetrain** — ✅ engine + gearbox + FWD/RWD/AWD + clutch.
+- **D) Terrain** — ✅ `World` trait, procedural hills, SRTM heightfield support.
+- **E) Telemetry + Grip tuning** — ✅ per-wheel contact CSV log (T key),
+  Pacejka lateral `b` tuned from real test data (8→18), vehicle feel tested on
+  skidpad + test track (rovinka). Auto is drivable and repeatable.
+- **Tire model** — Pacejka procedural, good enough. Future: tire temps (teplota → grip),
+  per-axle balance, wear simulation.
+- **Parked (return after physics stable):** `.veh` car suspension + beam precompression
+  deferral.
+
+### Phase 2.5 — UI/UX
+- **Next:** Full UI/HUD overhaul. Today: provizorní buttons, debug overlay, simple HUD.
+  Plans:
+  - Game HUD: speed, RPM, gear, steering angle (in-race feel).
+  - Dev overlay: telemetry graphs (live grip curve), suspension geometry, per-node forces
+    (optional toggle).
+  - Build menu: part picker (engine, gearbox, suspension type, diff), live switching.
+  - Map picker: improved UI (buttons → tab selection), label terrain type.
+  - Camera toggle cleaned up (C = chase/FPV, not mode soup).
+
+### Phase 3 — World
+- OSM data loader, SRTM integration, road mesh from OSM ways, one real location.
 
 ### Phase 3 — World
 - OSM data loader, SRTM elevation → terrain mesh, road mesh from OSM ways, one real location
