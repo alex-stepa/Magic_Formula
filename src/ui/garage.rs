@@ -384,7 +384,8 @@ fn update_specs(
     // Struktura auta (nody/beamy/trojúhelníky/kola) podle výběru, s cache pro .veh.
     let (counts, cap) = match build.car {
         CarChoice::TestCar => (
-            ["16".into(), "32".into(), "—".into(), "4".into()],
+            // hodnoty z logu spawn_solver_car: „Solver auto: 18 nodů, 64 beamů, 4 kol"
+            ["18".into(), "64".into(), "—".into(), "4".into()],
             "Testovací vůz — kvádr + 4 kola, vestavěný".to_string(),
         ),
         CarChoice::Veh(i) => {
