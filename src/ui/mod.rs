@@ -48,7 +48,6 @@ const fn hex(r: u8, g: u8, b: u8) -> Color {
 }
 
 pub const BG: Color = hex(0x1d, 0x2d, 0x3d);
-pub const SURFACE: Color = hex(0x2c, 0x45, 0x5d);
 pub const TEXT: Color = hex(0xf2, 0xf2, 0xf3);
 pub const ACCENT: Color = hex(0x59, 0x80, 0xa6);
 pub const ACCENT_300: Color = hex(0xb5, 0xd9, 0xfd);
@@ -64,13 +63,6 @@ pub struct UiFonts {
     pub mono: Handle<Font>,    // Share Tech Mono (dash čísla)
 }
 
-fn load_fonts(mut commands: Commands, assets: Res<AssetServer>) {
-    commands.insert_resource(UiFonts {
-        body: assets.load("fonts/Barlow-Regular.ttf"),
-        heading: assets.load("fonts/BarlowCondensed-SemiBold.ttf"),
-        mono: assets.load("fonts/ShareTechMono-Regular.ttf"),
-    });
-}
 
 // ── Pomocníci ────────────────────────────────────────────────────────────────
 
@@ -112,11 +104,19 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<AppState>()
+        // Fonty rovnou tady — OnEnter(Title) běží dřív než PreStartup commands,
+        // resource musí existovat před prvním state transition.
+        let assets = app.world().resource::<AssetServer>();
+        let fonts = UiFonts {
+            body: assets.load("fonts/Barlow-Regular.ttf"),
+            heading: assets.load("fonts/BarlowCondensed-SemiBold.ttf"),
+            mono: assets.load("fonts/ShareTechMono-Regular.ttf"),
+        };
+        app.insert_resource(fonts)
+            .init_state::<AppState>()
             .enable_state_scoped_entities::<AppState>()
             .init_resource::<Paused>()
             .init_resource::<SelectedMap>()
-            .add_systems(PreStartup, load_fonts)
             .add_plugins((title::plugin, garage::plugin, hud::plugin));
     }
 }
