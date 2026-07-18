@@ -12,6 +12,7 @@ mod veh; // načítání .veh formátu (Fáze 2 — node-beam soft-body)
 mod solver; // jádro fyziky: SoftBody, node-beam solver, tire model
 mod vehicle; // auto: zavěšení, drivetrain, buildery, ovládání
 mod world; // terén jako trait (rovina / kopce / časem OSM heightfield)
+mod ui; // obrazovky: title / garáž / HUD + pauza (stavový automat)
 
 use solver::*;
 use vehicle::*;
@@ -37,12 +38,25 @@ fn main() {
         .init_resource::<CarBuild>()
         .init_resource::<Terrain>()
         .init_resource::<Telemetry>()
+        .add_plugins(ui::UiPlugin)
         .add_systems(Startup, setup)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
-        .add_systems(FixedUpdate, softbody_solve)
+        // Běží jen ve hře a mimo pauzu — na title/garáži/pauze svět stojí.
+        .add_systems(FixedUpdate, softbody_solve.run_if(ui::in_game_unpaused))
         // Update = spustí se každý snímek (reaguje na vstup, zapisuje pozice do meshe).
         // Pořadí: nejdřív řazení + výpočet RPM, pak pohon (čte RPM), pak zbytek.
-        .add_systems(Update, (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, telemetry_log, update_hud, camera_control, spawn_buttons, map_buttons, spawn_shortcuts, toggle_menu, highlight_build_buttons, softbody_to_transforms, update_softbody_mesh).chain())
+        // Render sync (softbody_to_transforms, update_softbody_mesh) běží vždy —
+        // auto musí být vidět i pod pauzou.
+        .add_systems(
+            Update,
+            (
+                (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, telemetry_log, camera_control, spawn_shortcuts)
+                    .chain()
+                    .run_if(ui::in_game_unpaused),
+                (softbody_to_transforms, update_softbody_mesh).chain(),
+            )
+                .chain(),
+        )
         .run();
 }
 
@@ -73,9 +87,7 @@ fn setup(
     spawn_ground(&mut commands, &mut meshes, &mut materials, &mut images, terrain.0.as_ref());
     build_test_track(&mut commands, &mut meshes, &mut materials);
 
-    // Auto se na startu NEspawnuje — vybereš ho v UI (tlačítka) nebo klávesou 1/2/3.
-    spawn_ui(&mut commands);
-    spawn_hud(&mut commands);
+    // Auto se na startu NEspawnuje — vybere se v garáži / titulní obrazovce.
 }
 
 // Zem: mesh terénu (mřížka vzorkuje Terrain) s mřížkovou texturou. FYZIKA jede z Terrain
@@ -171,54 +183,6 @@ fn grid_texture() -> Image {
     img
 }
 
-// HUD vpravo dole: rychlost / kvalt / otáčky. Text přepisuje update_hud každý snímek.
-fn spawn_hud(commands: &mut Commands) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                bottom: Val::Px(16.0),
-                right: Val::Px(16.0),
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
-        ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new("—"),
-                TextFont { font_size: 26.0, ..default() },
-                TextColor(Color::srgb(0.9, 0.95, 1.0)),
-                Node { margin: UiRect::all(Val::Px(10.0)), ..default() },
-                HudText,
-            ));
-        });
-}
-
-// Co dané tlačítko / klávesa udělá.
-#[derive(Component, Clone)]
-enum SpawnAction {
-    RigidCar,                     // tuhá node-beam konfigurace (kvádr + 4 kola), NE rapier rigid-body
-    SoftBody(String),             // node-beam soft-body z .veh souboru na téhle cestě
-    SetSuspension(SuspensionKind), // vybere díl zavěšení do CarBuild; přestaví stojící auto
-    Clear,                        // smaže všechna naspawnovaná auta
-}
-
-// Jediné tlačítko, co otevírá/zavírá menu.
-#[derive(Component)]
-struct MenuToggleButton;
-
-// Panel s volbami (rozbalovací) — přepíná se jeho zobrazení.
-#[derive(Component)]
-struct MenuPanel;
-
-// Marker textu HUDu (rychlost/kvalt/otáčky) — podle něj ho update systém najde a přepíše.
-#[derive(Component)]
-struct HudText;
-
-// Volba mapy v pickeru — vlastní komponenta (ne SpawnAction), řeší ji `map_buttons`.
-#[derive(Component, Clone, Copy)]
-struct MapAction(MapKind);
-
 // Render mesh terénu — podle markeru ho picker najde, smaže a postaví z nové mapy.
 #[derive(Component)]
 struct GroundMesh;
@@ -243,198 +207,29 @@ fn available_vehs() -> Vec<std::path::PathBuf> {
     vehs
 }
 
-// UI vlevo nahoře: jedno tlačítko „Menu", které rozbalí/sbalí panel s volbami.
-fn spawn_ui(commands: &mut Commands) {
-    commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Px(10.0),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(6.0),
-            ..default()
-        })
-        .with_children(|root| {
-            // Toggle tlačítko — vždy viditelné.
-            root.spawn((
-                Button,
-                Node {
-                    width: Val::Px(260.0),
-                    height: Val::Px(34.0),
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
-                    ..default()
-                },
-                BackgroundColor(Color::srgb(0.2, 0.2, 0.28)),
-                MenuToggleButton,
-            ))
-            .with_children(|b| {
-                b.spawn((
-                    Text::new("\u{2630} Menu"),
-                    TextFont { font_size: 16.0, ..default() },
-                    TextColor(Color::WHITE),
-                ));
-            });
-
-            // Panel s volbami — na startu OTEVŘENÝ (toggle „☰ Menu" ho sbalí/rozbalí).
-            root.spawn((
-                Node {
-                    display: Display::Flex,
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(6.0),
-                    ..default()
-                },
-                MenuPanel,
-            ))
-            .with_children(|panel| {
-                spawn_button(panel, "1 — Testovací vůz", SpawnAction::RigidCar);
-                // Výběr dílu zavěšení (build systém): přepne CarBuild + přestaví stojící auto.
-                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::RIGID.label()), SpawnAction::SetSuspension(SuspensionKind::RIGID));
-                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::COIL.label()), SpawnAction::SetSuspension(SuspensionKind::COIL));
-                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::MCPHERSON.label()), SpawnAction::SetSuspension(SuspensionKind::MCPHERSON));
-                spawn_button(panel, &format!("  Zavěšení: {}", SuspensionKind::DOUBLE_WISHBONE.label()), SpawnAction::SetSuspension(SuspensionKind::DOUBLE_WISHBONE));
-                for (i, path) in available_vehs().iter().enumerate() {
-                    let file = path.file_name().unwrap().to_string_lossy();
-                    let label = format!("{} — Soft-body: {file}", i + 2);
-                    spawn_button(panel, &label, SpawnAction::SoftBody(path.to_string_lossy().into_owned()));
-                }
-                spawn_button(panel, "Backspace — Clear (smazat auta)", SpawnAction::Clear);
-                // Map picker: přepnutí terénu (data se ladí na Testovací ploše = rovina + dráha).
-                spawn_map_button(panel, MapKind::TestPad);
-                spawn_map_button(panel, MapKind::Hills);
-                spawn_map_button(panel, MapKind::Real);
-            });
-        });
-}
-
-// Toggle menu: klik na „Menu" přepne zobrazení panelu.
-fn toggle_menu(
-    toggle: Query<&Interaction, (Changed<Interaction>, With<MenuToggleButton>)>,
-    mut panel: Query<&mut Node, With<MenuPanel>>,
+// Přepne mapu za běhu: nový Terrain + rebuild render meshe země + testovací dráha
+// (jen na TestPad). Auta zůstanou — solver čte height/normal z Terrain živě.
+// Volá UI (map picker na title screenu).
+fn rebuild_map(
+    kind: MapKind,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    terrain: &mut Terrain,
+    ground: impl IntoIterator<Item = Entity>,
+    track: impl IntoIterator<Item = Entity>,
 ) {
-    for interaction in &toggle {
-        if *interaction == Interaction::Pressed {
-            for mut node in &mut panel {
-                node.display = if node.display == Display::None {
-                    Display::Flex
-                } else {
-                    Display::None
-                };
-            }
-        }
+    *terrain = Terrain(kind.build());
+    for e in ground {
+        commands.entity(e).despawn_recursive(); // starý mesh + collider pryč
     }
-}
-
-// Pomocník: jedno tlačítko s popiskem a akcí.
-fn spawn_button(parent: &mut ChildBuilder, label: &str, action: SpawnAction) {
-    spawn_button_with(parent, label, action);
-}
-
-// Tlačítko mapy (nese MapAction místo SpawnAction — jinou akci řeší jiný systém).
-fn spawn_map_button(parent: &mut ChildBuilder, kind: MapKind) {
-    spawn_button_with(parent, &format!("Mapa: {}", kind.label()), MapAction(kind));
-}
-
-// Jádro tlačítka pro libovolnou komponentu-akci (SpawnAction i MapAction).
-fn spawn_button_with(parent: &mut ChildBuilder, label: &str, action: impl Component) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(260.0),
-                height: Val::Px(34.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::srgb(0.15, 0.15, 0.18)),
-            action,
-        ))
-        .with_children(|b| {
-            b.spawn((
-                Text::new(label),
-                TextFont { font_size: 15.0, ..default() },
-                TextColor(Color::WHITE),
-            ));
-        });
-}
-
-// Reakce na kliknutí tlačítka → spawne příslušné auto.
-fn spawn_buttons(
-    interactions: Query<(&Interaction, &SpawnAction), (Changed<Interaction>, With<Button>)>,
-    spawned: Query<Entity, With<Spawned>>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut softbody: ResMut<SoftBody>,
-    mut drivetrain: ResMut<Drivetrain>,
-    mut build: ResMut<CarBuild>,
-    terrain: Res<Terrain>,
-) {
-    let ground_y = terrain.0.height(0.0, 0.0);
-    for (interaction, action) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        match action {
-            SpawnAction::RigidCar => spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, ground_y),
-            SpawnAction::SoftBody(path) => spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, path, ground_y),
-            SpawnAction::SetSuspension(kind) => {
-                build.suspension = *kind;
-                // Stojí-li TESTOVACÍ auto, přestav ho hned ať je rozdíl vidět.
-                // .veh auto ne — má zavěšení z reálných dat, menu dílů se ho netýká.
-                if softbody.chassis.is_some() && !softbody.from_veh {
-                    clear_spawned(&mut commands, &spawned, &mut softbody);
-                    spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, ground_y);
-                }
-            }
-            SpawnAction::Clear => clear_spawned(&mut commands, &spawned, &mut softbody),
-        }
+    spawn_ground(commands, meshes, materials, images, terrain.0.as_ref());
+    for e in track {
+        commands.entity(e).despawn_recursive(); // dráha jen na TestPad
     }
-}
-
-// Picker mapy: přepne Terrain, přestaví render mesh země a testovací dráhu (jen na
-// TestPad). Auta zůstanou — jen jim „podjede" nový terén (solver čte height/normal
-// z Terrain, takže se dopadem srovnají). Vlastní systém (ne spawn_buttons): má jiné
-// zdroje (Terrain ResMut, Images, dotazy na zem/dráhu) a drží je stranou od aut.
-fn map_buttons(
-    interactions: Query<(&Interaction, &MapAction), (Changed<Interaction>, With<Button>)>,
-    ground: Query<Entity, With<GroundMesh>>,
-    track: Query<Entity, With<TrackProp>>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut terrain: ResMut<Terrain>,
-) {
-    for (interaction, MapAction(kind)) in &interactions {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        *terrain = Terrain(kind.build());
-        for e in &ground {
-            commands.entity(e).despawn_recursive(); // starý mesh + collider pryč
-        }
-        spawn_ground(&mut commands, &mut meshes, &mut materials, &mut images, terrain.0.as_ref());
-        for e in &track {
-            commands.entity(e).despawn_recursive(); // dráha jen na TestPad
-        }
-        if *kind == MapKind::TestPad {
-            build_test_track(&mut commands, &mut meshes, &mut materials);
-        }
-    }
-}
-
-// Zvýrazní aktivní díl zavěšení v menu (selektor musí ukázat, co je vybráno).
-fn highlight_build_buttons(build: Res<CarBuild>, mut buttons: Query<(&SpawnAction, &mut BackgroundColor)>) {
-    for (action, mut bg) in &mut buttons {
-        if let SpawnAction::SetSuspension(kind) = action {
-            *bg = if *kind == build.suspension {
-                BackgroundColor(Color::srgb(0.2, 0.45, 0.3)) // aktivní = zelené
-            } else {
-                BackgroundColor(Color::srgb(0.15, 0.15, 0.18))
-            };
-        }
+    if kind == MapKind::TestPad {
+        build_test_track(commands, meshes, materials);
     }
 }
 
@@ -617,39 +412,6 @@ fn telemetry_log(
     for (i, front, tm) in rows {
         let _ = writeln!(w, "{t:.3},{i},{},{speed:.2},{:.1},{:.4},{:.3},{:.1},{:.1}",
             front as u8, tm.fz, tm.slip_ratio, tm.slip_angle.to_degrees(), tm.f_long, tm.f_lat);
-    }
-}
-
-// Přepíše HUD text aktuálními hodnotami z Drivetrain.
-fn update_hud(dt: Res<Drivetrain>, sb: Res<SoftBody>, tel: Res<Telemetry>, mut hud: Query<&mut Text, With<HudText>>) {
-    let gear = match dt.gear {
-        -1 => "R".to_string(),
-        0 => "N".to_string(),
-        g => g.to_string(),
-    };
-    let diff = if dt.rear_diff.lock > 0.5 { "ZAMČENÝ" } else { "otevřený" };
-    let clutch = if dt.stalled {
-        "  CHCÍPLO (Shift+R)"
-    } else if dt.clutch < 0.95 {
-        "  SPOJKA"
-    } else {
-        ""
-    };
-    // Telemetrie: přední kola slip angle (°) + Fz (N) pro živý pohled při ladění.
-    let front: Vec<_> = sb.wheels.iter().filter(|w| w.front).collect();
-    let slip_line = if front.is_empty() {
-        String::new()
-    } else {
-        let sa = front.iter().map(|w| w.telem.slip_angle.to_degrees()).sum::<f32>() / front.len() as f32;
-        let fz = front.iter().map(|w| w.telem.fz).sum::<f32>();
-        let rec = if tel.writer.is_some() { "  ● REC" } else { "" };
-        format!("\náz {sa:>4.1}°  Fz {fz:>5.0} N{rec}")
-    };
-    if let Ok(mut text) = hud.get_single_mut() {
-        text.0 = format!(
-            "{:>3.0} km/h\nKvalt {}{clutch}\n{:>5.0} ot/min\n{}  diff: {}{slip_line}",
-            dt.speed_kmh, gear, dt.rpm, dt.layout.label(), diff
-        );
     }
 }
 
