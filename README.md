@@ -170,12 +170,12 @@ src/
   surface normal, slip directions projected onto the tangent plane. `Hills` = procedural
   rolling hills (flat zone around spawn), render mesh sampled from the terrain → **step D**
 
-### Phase 2.5 — UI/UX (next)
-- [ ] Game HUD: speed, RPM, gear, steering angle
-- [ ] Dev overlay: telemetry live graphs, suspension geometry, forces
-- [ ] Build menu: part picker with live switching
-- [ ] Map picker UI polish
-- [ ] Camera controls cleanup
+### Phase 2.5 — UI/UX (next; design v `Game magic formula UI.zip`)
+- [ ] Title screen: režimy + map picker + klávesy
+- [ ] Garáž: auto + díly (zavěšení/pohon/diff) + spec tabulka, Vyjet/Zpět
+- [ ] Herní HUD: rally dash — RPM oblouk + LED, rychlost, kvalt, boční štítky
+- [ ] Telemetrie overlay (T): per-kolo tabulka Fz/skluz/áz/F_long/F_lat
+- [ ] Pauza (Esc): Pokračovat / Garáž / Hlavní menu
 
 ### NOT yet
 - ❌ Suspension for `.veh` cars (still `Rigid` + placeholder ride height, **parked**)
@@ -202,15 +202,20 @@ src/
 - **Parked (return after physics stable):** `.veh` car suspension + beam precompression
   deferral.
 
-### Phase 2.5 — UI/UX
-- **Next:** Full UI/HUD overhaul. Today: provizorní buttons, debug overlay, simple HUD.
-  Plans:
-  - Game HUD: speed, RPM, gear, steering angle (in-race feel).
-  - Dev overlay: telemetry graphs (live grip curve), suspension geometry, per-node forces
-    (optional toggle).
-  - Build menu: part picker (engine, gearbox, suspension type, diff), live switching.
-  - Map picker: improved UI (buttons → tab selection), label terrain type.
-  - Camera toggle cleaned up (C = chase/FPV, not mode soup).
+### Phase 2.5 — UI/UX (design hotový — `Game magic formula UI.zip`, klikací prototyp)
+Struktura obrazovek podle návrhu:
+- **Title screen**: logo + režimy — Volná jízda / Garáž / Rally (brzy) / Nastavení
+  + map picker (Testovací plocha · Kopce · Reálný terén SRTM) + přehled kláves.
+- **Garáž**: výběr auta (Testovací vůz / Fabia `.veh`) + osazení dílů — zavěšení
+  (Rigid/Coil/McPherson/Double wishbone), pohon (FWD/RWD/AWD), zadní diff
+  (otevřený/zamčený) + živá tabulka specifikací. Tlačítka Zpět / Vyjet.
+  Výměna dílu přestaví stojící auto za běhu (`CarBuild` pattern).
+- **Herní HUD**: rally dash (styl Sinco Tech, viz referenční foto v zipu) — RPM
+  oblouk se segmenty + shift LED, rychlost km/h, kvalt, ot/min; boční štítky:
+  pohon, diff, spojka, Fz předek, slip angle, ● REC indikátor.
+- **Telemetrie overlay** (T): tabulka per kolo — Fz, skluz, slip angle, F_long, F_lat.
+- **Pauza** (Esc): Pokračovat / Garáž / Hlavní menu + nápověda (Shift+R restart,
+  Backspace clear).
 
 ### Phase 3 — World
 - OSM data loader, SRTM integration, road mesh from OSM ways, one real location.
