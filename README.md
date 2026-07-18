@@ -170,12 +170,12 @@ src/
   surface normal, slip directions projected onto the tangent plane. `Hills` = procedural
   rolling hills (flat zone around spawn), render mesh sampled from the terrain → **step D**
 
-### Phase 2.5 — UI/UX (next; design v `Game magic formula UI.zip`)
-- [ ] Title screen: režimy + map picker + klávesy
-- [ ] Garáž: auto + díly (zavěšení/pohon/diff) + spec tabulka, Vyjet/Zpět
-- [ ] Herní HUD: rally dash — RPM oblouk + LED, rychlost, kvalt, boční štítky
-- [ ] Telemetrie overlay (T): per-kolo tabulka Fz/skluz/áz/F_long/F_lat
-- [ ] Pauza (Esc): Pokračovat / Garáž / Hlavní menu
+### Phase 2.5 — UI/UX (design v `Game magic formula UI.zip`)
+- [x] Title screen: režimy + map picker + klávesy
+- [x] Garáž: auto + díly (zavěšení/pohon/diff) + spec tabulka, Vyjet/Zpět
+- [x] Herní HUD: rally dash — RPM bar + shift LED, rychlost, kvalt, stavový řádek
+- [x] Telemetrie overlay (T): per-kolo tabulka Fz/skluz/áz/F_long/F_lat + souhrn
+- [x] Pauza (Esc): Pokračovat / Garáž / Hlavní menu
 
 ### NOT yet
 - ❌ Suspension for `.veh` cars (still `Rigid` + placeholder ride height, **parked**)
