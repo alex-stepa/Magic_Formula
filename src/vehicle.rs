@@ -542,17 +542,19 @@ pub fn spawn_solver_car(
     );
 }
 
-// Z neuspořádaných úchytů .veh vyber role dolních ramen pro Coil/McPherson/DW:
-// příčné = anchor nejvíc inboard (největší |Δx| od hubu → drží bok), podélné =
-// největší |Δz| (drží tah/brzdu). Test auto role plní ručně z rohů kvádru —
-// .veh je musí odvodit z geometrie. Volající zaručí anchors.len() >= 2.
-fn pick_arms(sb: &SoftBody, anchors: &[usize], hub: Vec3) -> (usize, usize) {
-    let lateral = *anchors.iter()
-        .max_by(|&&a, &&b| (hub.x - sb.pos[a].x).abs().total_cmp(&(hub.x - sb.pos[b].x).abs()))
-        .unwrap();
-    let longitudinal = *anchors.iter().filter(|&&a| a != lateral)
-        .max_by(|&&a, &&b| (hub.z - sb.pos[a].z).abs().total_cmp(&(hub.z - sb.pos[b].z).abs()))
-        .unwrap();
+// Role dolních ramen STEJNĚ jako u test auta (spawn_solver_car): příčné rameno míří
+// k PROTĚJŠÍ straně auta, podélné zrcadlově přes střed rozvoru — obě DLOUHÁ a skoro
+// vodorovná (krátké rameno má dva stabilní stavy a při dopadu se přesmykne → kolo
+// se zbortí do strany). Vybíráme nejbližší nod KAROSERIE k cílovému bodu té geometrie;
+// vlastní úchyty kola z .veh jsou moc blízko hubu, na roli ramen se nehodí.
+fn pick_arms(sb: &SoftBody, body_count: usize, hub: Vec3, mean_z: f32) -> (usize, usize) {
+    let nearest = |target: Vec3| {
+        (0..body_count)
+            .min_by(|&a, &b| sb.pos[a].distance_squared(target).total_cmp(&sb.pos[b].distance_squared(target)))
+            .unwrap()
+    };
+    let lateral = nearest(Vec3::new(-hub.x, hub.y, hub.z)); // protější strana, stejná výška/z
+    let longitudinal = nearest(Vec3::new(hub.x, hub.y, 2.0 * mean_z - hub.z)); // zrcadlo přes střed rozvoru
     (lateral, longitudinal)
 }
 
@@ -749,7 +751,7 @@ pub fn spawn_softbody(
                 build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
             }
             kind => {
-                let (lat, lon) = pick_arms(sb, anchors, hub_pos);
+                let (lat, lon) = pick_arms(sb, body_count, hub_pos, mean_z);
                 // Horní úchyt pružiny: Coil = nejbližší nod karoserie nad kolem (blatník);
                 // McPherson = VĚŽ — nový nod nad hubem, tuze přivázaný ke 4 nejbližším
                 // nodům karoserie (jede s rámem jako pevný úchyt, viz spawn_solver_car).
