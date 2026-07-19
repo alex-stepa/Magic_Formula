@@ -556,6 +556,14 @@ fn pick_arms(sb: &SoftBody, anchors: &[usize], hub: Vec3) -> (usize, usize) {
     (lateral, longitudinal)
 }
 
+// Nejbližší nod těla ASPOŇ min_up nad p — horní úchyt pružiny Coil (.veh nemá
+// suspension nody nad kolem, tak si půjčíme karoserii; blatník je přesně tam).
+fn nearest_above(sb: &SoftBody, body_count: usize, p: Vec3, min_up: f32) -> Option<usize> {
+    (0..body_count)
+        .filter(|&i| sb.pos[i].y > p.y + min_up)
+        .min_by(|&a, &b| sb.pos[a].distance_squared(p).total_cmp(&sb.pos[b].distance_squared(p)))
+}
+
 // BeamNG používá z = nahoru, Bevy y = nahoru. Přehodíme osy, ať auto stojí správně
 // (a zachováme pravotočivost: dopředné +y BeamNG → -z Bevy).
 pub fn veh_pos(p: [f32; 3]) -> Vec3 {
@@ -705,7 +713,8 @@ pub fn spawn_softbody(
     // Průměrné z hubů → hranice mezi přední (větší z) a zadní (menší z) osou.
     let mean_z = wheels.iter().map(|(_, p, _, _, _)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
 
-    // 2. průchod: hub-node + render disk + zavěšení (Rigid) + WheelC.
+    let body_count = node_idx.len(); // nody karoserie = 0..body_count (huby/věže až za nimi)
+    // 2. průchod: hub-node + render disk + zavěšení (podle CarBuild) + WheelC.
     for &(ref anchors, hub_pos, radius, width, half_track) in &wheels {
         let mut hub_pos = hub_pos;
         // .veh dá kola moc inboard (hub = průměr zatažených suspension nodů). Vytlač je ven
@@ -734,12 +743,45 @@ pub fn spawn_softbody(
         let hub = sb.add_node(hub_pos, hub_mass, render);
         match build.suspension {
             SuspensionKind::Rigid => build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid),
-            _ => {
-                // Krok 2: role dolních ramen už umíme vybrat; pružina nahoru (krok 3)
-                // ještě chybí → zatím jen log + Rigid, ať auto drží pohromadě.
-                let (lat, lon) = pick_arms(sb, anchors, hub_pos);
-                info!("kolo {}: příčné rameno → nod {}, podélné → nod {} (zdvih až s krokem 3)", sb.wheels.len(), lat, lon);
+            // DW potřebuje těhlici + horní ramena (krok 4) → zatím Rigid.
+            SuspensionKind::DoubleWishbone { .. } => {
+                info!("DoubleWishbone na .veh zatím není (krok 4) — kolo {} jede Rigid", sb.wheels.len());
                 build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
+            }
+            kind => {
+                let (lat, lon) = pick_arms(sb, anchors, hub_pos);
+                // Horní úchyt pružiny: Coil = nejbližší nod karoserie nad kolem (blatník);
+                // McPherson = VĚŽ — nový nod nad hubem, tuze přivázaný ke 4 nejbližším
+                // nodům karoserie (jede s rámem jako pevný úchyt, viz spawn_solver_car).
+                let spring_top = if let SuspensionKind::McPherson { .. } = kind {
+                    let tp = hub_pos + Vec3::new(-hub_pos.x.signum() * STRUT_TOWER_IN, STRUT_TOWER_UP, 0.0);
+                    let te = commands
+                        .spawn((
+                            Mesh3d(node_mesh.clone()),
+                            MeshMaterial3d(node_material.clone()),
+                            Transform::from_translation(tp),
+                            Spawned,
+                        ))
+                        .id();
+                    let t = sb.add_node(tp, 8.0, te);
+                    // ponytail: 4 nejbližší nody karoserie k věži — bez výběru směrů;
+                    // kdyby věž při dropu kývala, vybírat úchyty do kříže jako test auto.
+                    let mut near: Vec<usize> = (0..body_count).collect();
+                    near.sort_by(|&a, &b| sb.pos[a].distance_squared(tp).total_cmp(&sb.pos[b].distance_squared(tp)));
+                    for &n in near.iter().take(4) {
+                        sb.add_beam(t, n, STRUT_TOWER_K);
+                    }
+                    Some(t)
+                } else {
+                    nearest_above(sb, body_count, hub_pos, 0.3)
+                };
+                match spring_top {
+                    Some(top) => build_suspension(sb, hub, None, &[lat, lon, top], kind),
+                    None => {
+                        warn!("kolo {}: žádný nod karoserie nad hubem — fallback Rigid", sb.wheels.len());
+                        build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
+                    }
+                }
             }
         }
         sb.wheels.push(WheelC {
