@@ -542,6 +542,20 @@ pub fn spawn_solver_car(
     );
 }
 
+// Z neuspořádaných úchytů .veh vyber role dolních ramen pro Coil/McPherson/DW:
+// příčné = anchor nejvíc inboard (největší |Δx| od hubu → drží bok), podélné =
+// největší |Δz| (drží tah/brzdu). Test auto role plní ručně z rohů kvádru —
+// .veh je musí odvodit z geometrie. Volající zaručí anchors.len() >= 2.
+fn pick_arms(sb: &SoftBody, anchors: &[usize], hub: Vec3) -> (usize, usize) {
+    let lateral = *anchors.iter()
+        .max_by(|&&a, &&b| (hub.x - sb.pos[a].x).abs().total_cmp(&(hub.x - sb.pos[b].x).abs()))
+        .unwrap();
+    let longitudinal = *anchors.iter().filter(|&&a| a != lateral)
+        .max_by(|&&a, &&b| (hub.z - sb.pos[a].z).abs().total_cmp(&(hub.z - sb.pos[b].z).abs()))
+        .unwrap();
+    (lateral, longitudinal)
+}
+
 // BeamNG používá z = nahoru, Bevy y = nahoru. Přehodíme osy, ať auto stojí správně
 // (a zachováme pravotočivost: dopředné +y BeamNG → -z Bevy).
 pub fn veh_pos(p: [f32; 3]) -> Vec3 {
@@ -664,8 +678,8 @@ pub fn spawn_softbody(
                 }
             }
         }
-        if anchors.is_empty() {
-            continue; // bez úchytů neumíme kolo umístit ani zavěsit
+        if anchors.len() < 2 {
+            continue; // pick_arms chce ≥2 úchyty (a s 1 kolo stejně neumíme zavěsit)
         }
         let mut hub_pos = anchors.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / anchors.len() as f32;
         // Přesný střed kola z .veh (nodeOffset slotu): průměr úchytů ho jen aproximuje —
@@ -718,7 +732,16 @@ pub fn spawn_softbody(
         // Hub = nový node; jeho render entita = disk kola (softbody_to_transforms mu
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
         let hub = sb.add_node(hub_pos, hub_mass, render);
-        build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid); // přitáhni hub na suspension nody
+        match build.suspension {
+            SuspensionKind::Rigid => build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid),
+            _ => {
+                // Krok 2: role dolních ramen už umíme vybrat; pružina nahoru (krok 3)
+                // ještě chybí → zatím jen log + Rigid, ať auto drží pohromadě.
+                let (lat, lon) = pick_arms(sb, anchors, hub_pos);
+                info!("kolo {}: příčné rameno → nod {}, podélné → nod {} (zdvih až s krokem 3)", sb.wheels.len(), lat, lon);
+                build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
+            }
+        }
         sb.wheels.push(WheelC {
             hub,
             top: None, // .veh zavěšení zatím Rigid — kolo vzpřímené s rámem
