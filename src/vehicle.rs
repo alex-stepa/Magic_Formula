@@ -548,14 +548,18 @@ pub fn spawn_solver_car(
 // se zbortí do strany). Vybíráme nejbližší nod KAROSERIE k cílovému bodu té geometrie;
 // vlastní úchyty kola z .veh jsou moc blízko hubu, na roli ramen se nehodí.
 fn pick_arms(sb: &SoftBody, body_count: usize, hub: Vec3, mean_z: f32) -> (usize, usize) {
-    let nearest = |target: Vec3| {
-        (0..body_count)
-            .min_by(|&a, &b| sb.pos[a].distance_squared(target).total_cmp(&sb.pos[b].distance_squared(target)))
-            .unwrap()
-    };
-    let lateral = nearest(Vec3::new(-hub.x, hub.y, hub.z)); // protější strana, stejná výška/z
-    let longitudinal = nearest(Vec3::new(hub.x, hub.y, 2.0 * mean_z - hub.z)); // zrcadlo přes střed rozvoru
+    let lateral = nearest_body(sb, body_count, Vec3::new(-hub.x, hub.y, hub.z), &[]); // protější strana, stejná výška/z
+    let longitudinal = nearest_body(sb, body_count, Vec3::new(hub.x, hub.y, 2.0 * mean_z - hub.z), &[lateral]); // zrcadlo přes střed rozvoru
     (lateral, longitudinal)
+}
+
+// Nejbližší nod karoserie k cílovému bodu (exclude = už obsazené role — dva úchyty
+// na stejném nodu by degenerovaly na jedno rameno). body_count > 0 zaručuje volající.
+fn nearest_body(sb: &SoftBody, body_count: usize, target: Vec3, exclude: &[usize]) -> usize {
+    (0..body_count)
+        .filter(|i| !exclude.contains(i))
+        .min_by(|&a, &b| sb.pos[a].distance_squared(target).total_cmp(&sb.pos[b].distance_squared(target)))
+        .unwrap()
 }
 
 // Nejbližší nod těla ASPOŇ min_up nad p — horní úchyt pružiny Coil (.veh nemá
@@ -743,12 +747,37 @@ pub fn spawn_softbody(
         // Hub = nový node; jeho render entita = disk kola (softbody_to_transforms mu
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
         let hub = sb.add_node(hub_pos, hub_mass, render);
+        let mut knuckle = None; // těhlice (jen DW) — WheelC.top, dává disku camber
         match build.suspension {
             SuspensionKind::Rigid => build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid),
-            // DW potřebuje těhlici + horní ramena (krok 4) → zatím Rigid.
-            SuspensionKind::DoubleWishbone { .. } => {
-                info!("DoubleWishbone na .veh zatím není (krok 4) — kolo {} jede Rigid", sb.wheels.len());
-                build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
+            // DW jako u test auta: dolní ramena dlouhá (pick_arms), těhlice nad hubem,
+            // horní A-rameno krátké na nody STEJNÉ strany + příčná výztuha na protější
+            // horní nod (bez ní se top přesmykne — viz build_suspension).
+            kind @ SuspensionKind::DoubleWishbone { .. } => {
+                let (lat, lon) = pick_arms(sb, body_count, hub_pos, mean_z);
+                match nearest_above(sb, body_count, hub_pos, 0.3) {
+                    Some(spring) => {
+                        let kp = hub_pos + Vec3::Y * KNUCKLE_H;
+                        let ke = commands
+                            .spawn((
+                                Mesh3d(node_mesh.clone()),
+                                MeshMaterial3d(node_material.clone()),
+                                Transform::from_translation(kp),
+                                Spawned,
+                            ))
+                            .id();
+                        let top = sb.add_node(kp, 10.0, ke);
+                        let up_f = nearest_body(sb, body_count, kp + Vec3::Z * 0.4, &[]);
+                        let up_r = nearest_body(sb, body_count, kp - Vec3::Z * 0.4, &[up_f]);
+                        let brace = nearest_body(sb, body_count, Vec3::new(-kp.x, kp.y, kp.z), &[up_f, up_r]);
+                        build_suspension(sb, hub, Some(top), &[lat, lon, spring, up_f, up_r, brace], kind);
+                        knuckle = Some(top);
+                    }
+                    None => {
+                        warn!("kolo {}: žádný nod karoserie nad hubem — fallback Rigid", sb.wheels.len());
+                        build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
+                    }
+                }
             }
             kind => {
                 let (lat, lon) = pick_arms(sb, body_count, hub_pos, mean_z);
@@ -788,7 +817,7 @@ pub fn spawn_softbody(
         }
         sb.wheels.push(WheelC {
             hub,
-            top: None, // .veh zavěšení zatím Rigid — kolo vzpřímené s rámem
+            top: knuckle, // Some jen u DW — orientace disku z hub→top (camber)
             render,
             radius,
             spin: 0.0,
