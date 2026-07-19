@@ -605,7 +605,6 @@ pub fn spawn_softbody(
 
     // Nový spawn = čistý solver (jinak by se sčítala dvě auta do jednoho stavu).
     *sb = SoftBody::default();
-    sb.from_veh = true; // menu dílů (SetSuspension) tohle auto nepřestavuje
     info!("Zavěšení z garáže: {}", build.suspension.label());
 
     // AXLE nody kol (fw1r…) mají v jbeam jen LOKÁLNÍ souřadnice kola (~[±x,0,0]) —
@@ -830,6 +829,27 @@ pub fn spawn_softbody(
             tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
             telem: WheelTelem::default(),
         });
+    }
+
+    // Stabilizátory jako u test auta (vše se zdvihem — Rigid ho nemá, V-nod by byl balast).
+    // Páry L/R na nápravu z hubů podle front flagu a znaménka x; links = nody karoserie
+    // nad koly (u test auta horní rohy — tady jejich nejbližší ekvivalent).
+    if !matches!(build.suspension, SuspensionKind::Rigid) {
+        for front in [true, false] {
+            let (mut l, mut r) = (None, None);
+            for w in &sb.wheels {
+                if w.front != front {
+                    continue;
+                }
+                if sb.pos[w.hub].x < 0.0 { l = Some(w.hub) } else { r = Some(w.hub) }
+            }
+            let Some((hl, hr)) = l.zip(r) else { continue }; // náprava bez páru — bez stabilizátoru
+            let (Some(ll), Some(lr)) = (
+                nearest_above(sb, body_count, sb.pos[hl], 0.3),
+                nearest_above(sb, body_count, sb.pos[hr], 0.3),
+            ) else { continue };
+            build_antiroll(commands, sb, &node_mesh, &node_material, hl, hr, ll, lr);
+        }
     }
 
     // --- A3: ChassisFrame z nodů Fabie (směr auta pro solver/kameru/render) ---
