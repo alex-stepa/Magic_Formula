@@ -651,7 +651,7 @@ pub fn spawn_softbody(
 
     // 1. průchod: pro každé kolo poskládej úchyty (sousedi axle nodů, co v solveru
     // existují) a z jejich průměru spočti REÁLNOU pozici hubu.
-    let mut wheels: Vec<(Vec<usize>, Vec3, f32, f32)> = Vec::new(); // (úchyty, hub_pos, radius, width)
+    let mut wheels: Vec<(Vec<usize>, Vec3, f32, f32, f32)> = Vec::new(); // (úchyty, hub_pos, radius, width, half_track)
     for wheel in &vehicle.wheels {
         let mut anchors: Vec<usize> = Vec::new();
         for axle in [wheel.node1.as_str(), wheel.node2.as_str()] {
@@ -670,11 +670,14 @@ pub fn spawn_softbody(
         let mut hub_pos = anchors.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / anchors.len() as f32;
         // Přesný střed kola z .veh (nodeOffset slotu): průměr úchytů ho jen aproximuje —
         // u zadní vlečné nápravy lže o ~0.3 m dopředu (rameno táhne průměr k předku).
-        // x necháváme z úchytů: nese znaménko strany a stejně se tlačí na rozchod níž.
+        // x z úchytů nese jen znaménko strany; |x| = půlrozchod z .veh (konvertor ho
+        // skládá z axle nodů + nodeOffsetu), 0 = starý .veh bez něj → fallback níž.
+        let mut half_track = 0.0;
         if let Some(c) = wheel.center {
             let p = origin + veh_pos(c);
             hub_pos.y = p.y;
             hub_pos.z = p.z;
+            half_track = c[0].abs();
         }
         // Rozměry z .veh; 0 = data chyběla (tire party mimo mod). Poloměr pak odvoď
         // z výšky středu kola nad zemí v klidu (center.z v jbeam, z = nahoru) ≈ poloměr.
@@ -683,20 +686,19 @@ pub fn spawn_softbody(
             else { 0.34 };
         // 0.185 = pneu 185/60R14 (její ⌀ 578 mm sedí na center.z 0.288 výš)
         let width = if wheel.width > 0.0 { wheel.width } else { 0.185 };
-        wheels.push((anchors, hub_pos, radius, width));
+        wheels.push((anchors, hub_pos, radius, width, half_track));
     }
     // Průměrné z hubů → hranice mezi přední (větší z) a zadní (menší z) osou.
-    let mean_z = wheels.iter().map(|(_, p, _, _)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
+    let mean_z = wheels.iter().map(|(_, p, _, _, _)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
 
     // 2. průchod: hub-node + render disk + zavěšení (Rigid) + WheelC.
-    for &(ref anchors, hub_pos, radius, width) in &wheels {
+    for &(ref anchors, hub_pos, radius, width, half_track) in &wheels {
         let mut hub_pos = hub_pos;
         // .veh dá kola moc inboard (hub = průměr zatažených suspension nodů). Vytlač je ven
-        // na rozumný rozchod, ať nejsou zastrčená pod karoserií. Rest-length beamů zavěšení
-        // (build_suspension níž) tuhle polohu zafixuje, i když anchory zůstanou inboard.
-        // ponytail: konstanta — reálný rozchod je v jbeam nodeOffset jako $výraz
-        // ($trackwidth…), vyhodnocení proměnných až bude potřeba víc aut.
-        hub_pos.x = hub_pos.x.signum() * 0.80;
+        // na skutečný půlrozchod z .veh (center.x); 0.80 = fallback pro starý .veh bez něj.
+        // Rest-length beamů zavěšení (build_suspension níž) tuhle polohu zafixuje,
+        // i když anchory zůstanou inboard.
+        hub_pos.x = hub_pos.x.signum() * if half_track > 0.0 { half_track } else { 0.80 };
         let front = hub_pos.z > mean_z; // přední osa = +z (přední kola Fabie vyšla na +z)
         let render = commands
             .spawn((

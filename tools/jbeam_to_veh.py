@@ -132,6 +132,8 @@ def extract(root, offsets={}):
     nodes, beams, wheels, tris = [], [], [], []
     engine, gearbox, axles = None, {}, set()
     node_off = {}  # node id → nodeOffset partu (střed kola; wheel part má nody lokálně)
+    tire_size = {}  # 'F'/'R' → (radius, width): tire part je v common obsahu mimo mod,
+                    # ale VELIKOST nese jméno default tire slotu (tire_F_175_65_14_sport)
     if not isinstance(root, dict):
         return nodes, beams, wheels, tris, engine, gearbox, axles
     # Prepass: defaulty proměnných ze sekcí "variables" všech partů (řádek: [name, type,
@@ -146,13 +148,31 @@ def extract(root, offsets={}):
     for pname, part in root.items():
         if not isinstance(part, dict):
             continue
-        # nodeOffset ze slotu, co part obsadil: y/z floaty = použitelný střed,
-        # x bývá $výraz (rozchod) → nečitelné = 0, hra si stranu odvodí sama
+        # nodeOffset ze slotu, co part obsadil: y/z floaty = použitelný střed.
+        # x bývá $výraz (rozchod, "$=case($trackwidth == nil, $trackoffset+0.26, …)")
+        # → resolve() ho z defaultů proměnných vyhodnotí; POZOR: je to OFFSET nodů
+        # partu, absolutní střed kola se z něj skládá až v post-passu wheels níž.
         off = offsets.get(pname, {})
         center = None
         if isinstance(off.get("y"), float) and isinstance(off.get("z"), float):
-            x = off.get("x")
+            x = resolve(off.get("x"), jvars)
             center = [x if isinstance(x, float) else 0.0, off["y"], off["z"]]
+        # TIRE SLOTY: z default jména (tire_F_175_65_14_sport) šířka/profil/ráfek
+        # → radius = ráfek/2 + profil·šířka, width = šířka. Klíč F/R ze slotType.
+        rows = part.get("slots")
+        if isinstance(rows, list):
+            for row in rows[1:]:
+                if not (isinstance(row, list) and len(row) >= 2
+                        and isinstance(row[0], str) and isinstance(row[1], str)
+                        and row[0].startswith("tire")):
+                    continue
+                m = re.search(r"(\d{3})_(\d{2})_(\d{2})", row[1])
+                if not m:
+                    continue
+                w_mm, aspect, rim_in = (float(g) for g in m.groups())
+                axle = "F" if "_F" in row[0] else "R" if "_R" in row[0] else None
+                tire_size[axle] = (rim_in * 0.0254 / 2 + aspect / 100 * w_mm / 1000,
+                                   w_mm / 1000)
         # NODY: modifikátor {nodeWeight} platí pro následující řádky (stavový automat)
         rows = part.get("nodes")
         if isinstance(rows, list):
@@ -245,16 +265,25 @@ def extract(root, offsets={}):
                         axles.add("F")
                     if row[1].endswith("_R"):
                         axles.add("R")
+    posd = {n["id"]: n["pos"] for n in nodes}
     # Střed kola = nodeOffset partu, kterému patří jeho axle nody (pressureWheels
-    # bývají v jiném partu — wheeldata — než nody kola).
+    # bývají v jiném partu — wheeldata — než nody kola). x nodeOffsetu je OFFSET
+    # lokálních nodů partu → absolutní |x| středu = průměr |x| axle nodů + offset.
     for w in wheels:
         c = node_off.get(w["node1"]) or node_off.get(w["node2"])
         if c:
-            w["center"] = c
+            pa, pb = posd.get(w["node1"]), posd.get(w["node2"])
+            x = (abs(pa[0]) + abs(pb[0])) / 2 + c[0] if pa and pb else c[0]
+            w["center"] = [round(x, 6), c[1], c[2]]
+        # Rozměr pneu z tire slotu, jen když ho pressureWheels nedaly (radius 0).
+        # Náprava podle y středu (BeamNG +y = dozadu → přední y < 0).
+        if w["radius"] == 0.0 and tire_size:
+            axle = ("F" if c[1] < 0 else "R") if c else None
+            r_w = tire_size.get(axle) or next(iter(tire_size.values()))
+            w["radius"], w["width"] = round(r_w[0], 6), r_w[1]
     # Předpětí → klidová délka beamu (pružiny drží statickou zátěž jen díky němu).
     # precompressionRange = metry navíc k délce; beamPrecompression = poměr délky.
     # Až tady — beam smí odkazovat na nody z partu zpracovaného později.
-    posd = {n["id"]: n["pos"] for n in nodes}
     for b in beams:
         pre, rng = b.pop("_pre", None), b.pop("_rng", None)
         pa, pb = posd.get(b["a"]), posd.get(b["b"])
