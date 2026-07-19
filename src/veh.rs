@@ -21,6 +21,7 @@ pub struct Vehicle {
     // .veh formát je psaný na míru, zrcadlové structy by byly jen opisování.
     pub engine: Option<crate::vehicle::Engine>,
     pub gearbox: Option<crate::vehicle::Gearbox>,
+    pub brakes: Option<crate::vehicle::Brakes>,
     pub layout: Option<crate::vehicle::DriveLayout>,
 }
 

@@ -612,6 +612,7 @@ pub fn spawn_softbody(
     let stock = Drivetrain::default();
     dt.engine = vehicle.engine.take().unwrap_or(stock.engine);
     dt.gearbox = vehicle.gearbox.take().unwrap_or(stock.gearbox);
+    dt.brakes = vehicle.brakes.take().unwrap_or(stock.brakes);
     dt.layout = vehicle.layout.unwrap_or(stock.layout);
     // Nová skříň může mít míň kvaltů, než je zařazeno → srovnat, ať se neindexuje mimo.
     dt.gear = dt.gear.min(dt.gearbox.ratios.len() as i32);
