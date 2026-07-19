@@ -532,6 +532,21 @@ pub fn spawn_solver_car(
         Spawned,
     ));
 
+    // Předpětí pružin jako u Fabie (beam.rest): rest prodloužit tak, aby pružina
+    // nesla čtvrtinu váhy už při spawnu → auto si nesedá a dorazy (min/max kolem
+    // spawn délky, finish_spring) zůstanou centrované na jízdní výšku. Pružina =
+    // beam se stop_k (dává ho jen finish_spring) na hubu kola. delta = F/(k·cosθ):
+    // šikmá pružina drží svisle jen cosθ svojí síly.
+    let total_mass: f32 = sb.inv_mass.iter().map(|m| 1.0 / m).sum();
+    let f_wheel = total_mass * 9.81 / sb.wheels.len().max(1) as f32;
+    let hubs: Vec<usize> = sb.wheels.iter().map(|w| w.hub).collect();
+    for b in &mut sb.beams {
+        if b.stop_k > 0.0 && (hubs.contains(&b.i) || hubs.contains(&b.j)) {
+            let cos = (sb.pos[b.i] - sb.pos[b.j]).normalize().y.abs();
+            b.rest += f_wheel / (b.k * cos);
+        }
+    }
+
     sb.compute_substeps();
     info!(
         "Solver auto: {} nodů, {} beamů, {} kol, {} substepů",
