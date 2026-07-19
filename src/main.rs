@@ -266,7 +266,7 @@ fn spawn_shortcuts(
     if digits.iter().any(|d| keys.just_pressed(*d)) {
         for (i, path) in available_vehs().iter().enumerate() {
             if i < digits.len() && keys.just_pressed(digits[i]) {
-                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &path.to_string_lossy(), ground_y);
+                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, &path.to_string_lossy(), ground_y);
             }
         }
     }

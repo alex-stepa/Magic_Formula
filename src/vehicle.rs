@@ -557,6 +557,7 @@ pub fn spawn_softbody(
     materials: &mut Assets<StandardMaterial>,
     sb: &mut SoftBody,
     dt: &mut Drivetrain,
+    build: &CarBuild,
     path: &str,
     ground_y: f32,
 ) {
@@ -577,6 +578,7 @@ pub fn spawn_softbody(
     // Nový spawn = čistý solver (jinak by se sčítala dvě auta do jednoho stavu).
     *sb = SoftBody::default();
     sb.from_veh = true; // menu dílů (SetSuspension) tohle auto nepřestavuje
+    info!("Zavěšení z garáže: {}", build.suspension.label());
 
     // AXLE nody kol (fw1r…) mají v jbeam jen LOKÁLNÍ souřadnice kola (~[±x,0,0]) —
     // v globálním prostoru nesmysl: visely by na mega-tuhých beamech pod podlahou,
