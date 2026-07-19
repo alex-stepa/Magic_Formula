@@ -178,10 +178,10 @@ src/
 - [x] Pauza (Esc): Pokračovat / Garáž / Hlavní menu
 
 ### NOT yet
-- ❌ Suspension for `.veh` cars (still `Rigid` + placeholder ride height, **parked**)
-- ❌ Beam precompression gradual application (ponytail: deferred, complex + low ROI)
 - ❌ Per-axle tire balance tuning (both axles same Pacejka now)
 - ❌ Tire temps, wear, temperature dynamics
+- ❌ Brake temps (jbeam brake thermals data ready: brakeDiameter/brakeMass/vented-disc —
+  teplota → fade/grip brzd, časem)
 - ❌ Real OSM location, rally checkpoints, multiplayer
 
 ---
@@ -199,8 +199,9 @@ src/
   skidpad + test track (rovinka). Auto is drivable and repeatable.
 - **Tire model** — Pacejka procedural, good enough. Future: tire temps (teplota → grip),
   per-axle balance, wear simulation.
-- **Parked (return after physics stable):** `.veh` car suspension + beam precompression
-  deferral.
+- **`.veh` integration** — ✅ complete: suspension (Coil/McP/DW from garage), wheels
+  from jbeam, beam precompression (springs hold static load), bump stops, rebound
+  damping, per-axle brakes from jbeam. Future: brake temps (jbeam thermals data).
 
 ### Phase 2.5 — UI/UX (design hotový — `Game magic formula UI.zip`, klikací prototyp)
 Struktura obrazovek podle návrhu:
