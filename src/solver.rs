@@ -21,7 +21,6 @@ pub struct SoftBody {
     pub entities: Vec<Entity>, // node index i ↔ render entita (zápis Transformu)
     pub substeps: u32,         // kolik integračních kroků na snímek (adaptivně dle nejtužšího beamu)
     pub chassis: Option<ChassisFrame>, // referenční nody pro směr auta (None u .veh — nemá kola)
-    pub from_veh: bool,        // auto z .veh — menu dílů (SetSuspension) ho nepřestavuje
 }
 
 // Referenční nody těla, ze kterých solver dopočítá dopředný/boční směr auta (yaw rámu).
