@@ -664,6 +664,11 @@ pub fn spawn_softbody(
             sb.add_beam(i, j, 1000.0); // starý formát: dopočítej d z DAMPING_RATIO
         } else {
             sb.add_beam_damped(i, j, beam.stiffness, beam.damping);
+            // Asymetrický tlumič (jbeam beamDampRebound): natahování tlumí tvrději
+            // než stlačování → kolo se po nerovnosti vrací pomalu, auto „neplave".
+            if beam.rebound > 0.0 {
+                sb.beams.last_mut().unwrap().d_rebound = beam.rebound;
+            }
         }
         // Předpětí (beam.rest) jen pro čisté pružiny (k>0, d=0): rest > spawn délka
         // = pružina tlačí ven a nese statickou zátěž → auto sedí v jízdní výšce.

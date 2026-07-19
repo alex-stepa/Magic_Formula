@@ -47,6 +47,9 @@ pub struct Beam {
     pub stiffness: f32,
     #[serde(default)]
     pub damping: f32,
+    // Tlumení při natahování (jbeam beamDampRebound); 0 = symetrické (= damping).
+    #[serde(default)]
+    pub rebound: f32,
     // Klidová délka s předpětím (jbeam beamPrecompression/precompressionRange).
     // None = klidová délka je vzdálenost nodů při spawnu (většina beamů).
     pub rest: Option<f32>,

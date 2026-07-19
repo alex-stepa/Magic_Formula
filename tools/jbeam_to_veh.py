@@ -193,11 +193,12 @@ def extract(root, offsets={}):
         # (beamPrecompression poměr / precompressionRange metry) se přepočte na rest níž.
         rows = part.get("beams")
         if isinstance(rows, list):
-            k, d, pre = 0.0, 0.0, 1.0
+            k, d, dr, pre = 0.0, 0.0, 0.0, 1.0
             for row in rows[1:]:
                 if isinstance(row, dict):
                     k = resolve(row.get("beamSpring"), jvars) if "beamSpring" in row else k
                     d = resolve(row.get("beamDamp"), jvars) if "beamDamp" in row else d
+                    dr = resolve(row.get("beamDampRebound"), jvars) if "beamDampRebound" in row else dr
                     pre = resolve(row.get("beamPrecompression"), jvars) if "beamPrecompression" in row else pre
                     continue
                 if not isinstance(row, list):
@@ -206,10 +207,13 @@ def extract(root, offsets={}):
                     inline = row[2] if len(row) > 2 and isinstance(row[2], dict) else {}
                     ki = resolve(inline.get("beamSpring"), jvars) if "beamSpring" in inline else k
                     di = resolve(inline.get("beamDamp"), jvars) if "beamDamp" in inline else d
+                    dri = resolve(inline.get("beamDampRebound"), jvars) if "beamDampRebound" in inline else dr
                     pi = resolve(inline.get("beamPrecompression"), jvars) if "beamPrecompression" in inline else pre
                     # range (metry) jen inline — v datech se stavově nepoužívá; přebíjí poměr
                     ri = resolve(inline.get("precompressionRange"), jvars)
                     beams.append({"a": row[0], "b": row[1], "stiffness": ki or 0.0, "damping": di or 0.0,
+                                  # rebound jen když je (0 = symetrické) — ať soubor nebobtná
+                                  **({"rebound": dri} if dri else {}),
                                   "_pre": pi, "_rng": ri})
         # KOLA: pressureWheels, sloupce 0/3/4/7 = name/node1/node2/wheelDir.
         # Modifikátory radius/tireWidth stavově (jako beamSpring) — tenhle mod je nemá
