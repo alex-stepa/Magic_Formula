@@ -681,7 +681,8 @@ pub fn spawn_softbody(
         let radius = if wheel.radius > 0.0 { wheel.radius }
             else if let Some(c) = wheel.center { veh_pos(c).y }
             else { 0.34 };
-        let width = if wheel.width > 0.0 { wheel.width } else { 0.20 };
+        // 0.185 = pneu 185/60R14 (její ⌀ 578 mm sedí na center.z 0.288 výš)
+        let width = if wheel.width > 0.0 { wheel.width } else { 0.185 };
         wheels.push((anchors, hub_pos, radius, width));
     }
     // Průměrné z hubů → hranice mezi přední (větší z) a zadní (menší z) osou.
