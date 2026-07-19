@@ -42,6 +42,9 @@ pub const COIL_DAMP_MULT: f32 = 3.5;
 // Hodnoty dle BeamNG (shortBoundRange ~0.065 m, beamLimitSpring ~200k).
 pub const STOP_TRAVEL: f32 = 0.06;
 pub const STOP_K: f32 = 200_000.0;
+// Hub kola = 1 node: disk+pneu+brzda+část těhlice. Data na to nejsou (jbeam tire/rim
+// party jsou v BeamNG common obsahu mimo mod; axle nody mají jen 2×5 kg) → odhad.
+pub const HUB_MASS: f32 = 35.0; // 4× = 140 kg → test auto celkem ~1100 kg
 // Rebound tlumení = REBOUND_MULT × bump (jbeam Fabia: 7500/3500 ≈ 2.1). Tužší rebound
 // drží kolo na zemi po nerovnosti — auto se nehoupe („neplave").
 pub const REBOUND_MULT: f32 = 2.0;
@@ -389,7 +392,6 @@ pub fn spawn_solver_car(
     // --- 4 kola: hub-node (zavěšený na tělo) + render disk ---
     let wheel_radius = 0.34;
     let wheel_width = 0.22;
-    let hub_mass = 35.0; // 4× = 140 kg (kolo+hub+brzda) → celkem ~1100 kg
     let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
     // Sdílená značka u ráfku — kontrastní kostička, ať je vidět otáčení kola.
@@ -420,7 +422,7 @@ pub fn spawn_solver_car(
                 Spawned,
             ))
             .id();
-        let hub = sb.add_node(hub_pos, hub_mass, hub_dbg);
+        let hub = sb.add_node(hub_pos, HUB_MASS, hub_dbg);
         // Úchyty Coil z rohů rámu. Index rohu = 4·(sx>0) + 2·(horní) + 1·(sz>0), dané
         // pořadím stavby těla výš. Ramena do SPODNÍCH rohů (y=1.75 ≈ výška hubu → skoro
         // vodorovná), pružina do horního rohu nad kolem (skoro svislá).
@@ -509,7 +511,7 @@ pub fn spawn_solver_car(
             brake: 0.0,
             front,
             steered,
-            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
+            tire: TIRE_DEFAULT,
             telem: WheelTelem::default(),
         });
     }
@@ -531,6 +533,21 @@ pub fn spawn_solver_car(
         CarBody,
         Spawned,
     ));
+
+    // Předpětí pružin jako u Fabie (beam.rest): rest prodloužit tak, aby pružina
+    // nesla čtvrtinu váhy už při spawnu → auto si nesedá a dorazy (min/max kolem
+    // spawn délky, finish_spring) zůstanou centrované na jízdní výšku. Pružina =
+    // beam se stop_k (dává ho jen finish_spring) na hubu kola. delta = F/(k·cosθ):
+    // šikmá pružina drží svisle jen cosθ svojí síly.
+    let total_mass: f32 = sb.inv_mass.iter().map(|m| 1.0 / m).sum();
+    let f_wheel = total_mass * 9.81 / sb.wheels.len().max(1) as f32;
+    let hubs: Vec<usize> = sb.wheels.iter().map(|w| w.hub).collect();
+    for b in &mut sb.beams {
+        if b.stop_k > 0.0 && (hubs.contains(&b.i) || hubs.contains(&b.j)) {
+            let cos = (sb.pos[b.i] - sb.pos[b.j]).normalize().y.abs();
+            b.rest += f_wheel / (b.k * cos);
+        }
+    }
 
     sb.compute_substeps();
     info!(
@@ -597,6 +614,7 @@ pub fn spawn_softbody(
     let stock = Drivetrain::default();
     dt.engine = vehicle.engine.take().unwrap_or(stock.engine);
     dt.gearbox = vehicle.gearbox.take().unwrap_or(stock.gearbox);
+    dt.brakes = vehicle.brakes.take().unwrap_or(stock.brakes);
     dt.layout = vehicle.layout.unwrap_or(stock.layout);
     // Nová skříň může mít míň kvaltů, než je zařazeno → srovnat, ať se neindexuje mimo.
     dt.gear = dt.gear.min(dt.gearbox.ratios.len() as i32);
@@ -649,12 +667,29 @@ pub fn spawn_softbody(
             sb.add_beam(i, j, 1000.0); // starý formát: dopočítej d z DAMPING_RATIO
         } else {
             sb.add_beam_damped(i, j, beam.stiffness, beam.damping);
+            // Asymetrický tlumič (jbeam beamDampRebound): natahování tlumí tvrději
+            // než stlačování → kolo se po nerovnosti vrací pomalu, auto „neplave".
+            if beam.rebound > 0.0 {
+                sb.beams.last_mut().unwrap().d_rebound = beam.rebound;
+            }
         }
-        // ponytail: předpětí (beam.rest) VYPNUTO — okamžitá aplikace na všech 134 beamů
-        // (i caster/toe/camber) zbortí geometrii zavěšení (kola se stáhnou k sobě).
-        // BeamNG ho najíždí postupně (beamPrecompressionTime); až se .veh integrace
-        // vrátí, aplikovat jen na pružiny (k>0, d=0) nebo s náběhem.
-        let _ = beam.rest;
+        // Předpětí (beam.rest) jen pro čisté pružiny (k>0, d=0): rest > spawn délka
+        // = pružina tlačí ven a nese statickou zátěž → auto sedí v jízdní výšce.
+        // Mount-beamy (motor/výfuk, k obří, d>0) rest ignorují — jejich rest je
+        // kratší než spawn délka a stáhl by geometrii (kola k sobě, viz historie).
+        // K tomu dorazy zdvihu (±STOP_TRAVEL, STOP_K jako garáž) — ale kolem STATICKÉ
+        // délky (spawn = jízdní výška), ne kolem restu: statický průhyb (~0.13 m)
+        // > STOP_TRAVEL, doraz u restu by už při spawnu tlačil auto nahoru.
+        if let Some(rest) = beam.rest {
+            if beam.stiffness > 0.0 && beam.damping == 0.0 {
+                let b = sb.beams.last_mut().unwrap();
+                let static_len = b.rest; // před přepisem = spawn délka
+                b.rest = rest;
+                b.min = static_len - STOP_TRAVEL;
+                b.max = static_len + STOP_TRAVEL;
+                b.stop_k = STOP_K;
+            }
+        }
     }
 
     // --- A1+A2: KOLA z .veh ---
@@ -663,7 +698,6 @@ pub fn spawn_softbody(
     // jejich střed NENÍ skutečná poloha kola (přední i zadní by splynuly). Reálnou pozici
     // dostaneme z jejich beam-SOUSEDŮ (= suspension nody fh*/rh*…), co globální pozice mají.
     // Tytéž sousedy = úchyty zavěšení (build_suspension), takže hub na nich rovnou visí.
-    let hub_mass = 35.0;
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
     let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
     let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
@@ -745,7 +779,7 @@ pub fn spawn_softbody(
             .id();
         // Hub = nový node; jeho render entita = disk kola (softbody_to_transforms mu
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
-        let hub = sb.add_node(hub_pos, hub_mass, render);
+        let hub = sb.add_node(hub_pos, HUB_MASS, render);
         let mut knuckle = None; // těhlice (jen DW) — WheelC.top, dává disku camber
         match build.suspension {
             SuspensionKind::Rigid => build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid),
@@ -794,11 +828,14 @@ pub fn spawn_softbody(
                         ))
                         .id();
                     let t = sb.add_node(tp, 8.0, te);
-                    // ponytail: 4 nejbližší nody karoserie k věži — bez výběru směrů;
-                    // kdyby věž při dropu kývala, vybírat úchyty do kříže jako test auto.
-                    let mut near: Vec<usize> = (0..body_count).collect();
-                    near.sort_by(|&a, &b| sb.pos[a].distance_squared(tp).total_cmp(&sb.pos[b].distance_squared(tp)));
-                    for &n in near.iter().take(4) {
+                    // Úchyty DO KŘÍŽE jako test auto (spawn_solver_car): podélně dopředu
+                    // i dozadu, protější strana drží bok, nod pod věží drží svisle.
+                    // 4 nejbližší nody byly chumel na jednom místě → věž kývala (shimmy).
+                    let fwd = nearest_body(sb, body_count, tp + Vec3::Z * 0.4, &[]);
+                    let aft = nearest_body(sb, body_count, tp - Vec3::Z * 0.4, &[fwd]);
+                    let side = nearest_body(sb, body_count, Vec3::new(-tp.x, tp.y, tp.z), &[fwd, aft]);
+                    let below = nearest_body(sb, body_count, tp - Vec3::Y * 0.5, &[fwd, aft, side]);
+                    for n in [fwd, aft, side, below] {
                         sb.add_beam(t, n, STRUT_TOWER_K);
                     }
                     Some(t)
@@ -826,7 +863,7 @@ pub fn spawn_softbody(
             brake: 0.0,
             front,
             steered: front, // přední = řízená (A4 to případně doladí)
-            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
+            tire: TIRE_DEFAULT,
             telem: WheelTelem::default(),
         });
     }

@@ -18,6 +18,11 @@ Rust + Bevy, custom `.veh` format, node-beam physics on a **custom solver**
 Parses BeamNG `.jbeam` files and converts them into the custom `.veh` format.
 Standalone crate in its **own repository**, no dependency on the game.
 
+**Current state:** the Rust crate is the goal, but the actively used converter today is
+`tools/jbeam_to_veh.py` in this repo — it's ahead of the Rust version (slot selection,
+`$variable` resolution, precompression → `rest`, rebound damping, per-axle brakes,
+tire sizes). Porting these into `jbeam2veh` is planned.
+
 ---
 
 ## Tech Stack
@@ -30,8 +35,8 @@ Standalone crate in its **own repository**, no dependency on the game.
 | World physics | bevy_rapier3d 0.28 — static ground / world collisions only |
 | Tire model | Magic Formula (Pacejka) — longitudinal and lateral, friction circle |
 | Vehicle format | custom `.veh` (JSON) |
-| Map (base) | flat plane |
-| Map (future) | OpenStreetMap + SRTM elevation |
+| Map (base) | `World` trait — flat / procedural hills / SRTM heightfield |
+| Map (future) | OpenStreetMap roads + real locations |
 | Serialization | serde + serde_json |
 | CLI (jbeam-rs) | clap |
 
@@ -50,24 +55,32 @@ actually loads today** (`src/veh.rs`):
     { "id": "t5", "pos": [0.0, 1.33, 0.98], "mass": 1.1 }
   ],
   "beams": [
-    { "a": "fh1r", "b": "fs1r", "stiffness": 20000.0, "damping": 0.0 }
+    { "a": "fh1r", "b": "fs1r", "stiffness": 20000.0, "damping": 0.0,
+      "rebound": 0.0, "rest": 0.705 }
   ],
   "wheels": [
-    { "name": "FR", "node1": "fw1rr", "node2": "fw1r", "dir": 1 }
+    { "name": "FR", "node1": "fw1rr", "node2": "fw1r", "dir": 1,
+      "radius": 0.2916, "width": 0.175, "center": [0.715, -1.25, 0.288] }
   ],
   "triangles": [
     { "a": "fx2r", "b": "fh6r", "c": "fx2l" }
-  ]
+  ],
+  "engine":  { "torque_curve": [[0, 0], [5000, 159.5]], "idle_rpm": 800, "max_rpm": 6700 },
+  "gearbox": { "ratios": [3.25, 1.65, 1.03, 0.82], "final_drive": 3.89 },
+  "layout":  "fwd",
+  "brakes":  { "front": 1300, "rear": 450, "parking": 900 }
 }
 ```
 
 - `pos` is in BeamNG axes (z = up); the game flips them to Bevy (y = up) on load.
 - `wheels.node1/node2` = wheel axle nodes, `dir` = side/orientation.
-- `damping` from `.veh` is **not used** (tends to be unreliable) — the game derives
-  damping from stiffness.
+- Beams carry **real** `stiffness`/`damping` from jbeam; `rebound` = extension damping
+  (asymmetric dampers), `rest` = rest length with precompression (springs hold static
+  load). All optional — old `.veh` files still load (fallbacks apply).
+- `engine`/`gearbox`/`layout`/`brakes` are optional; missing = stock values.
 
-**Planned (NOT in the format yet):** a `parts` section (engine, gearbox, …) and
-`break_force` on beams. Coming with the drivetrain and build system.
+**Planned (NOT in the format yet):** `break_force` on beams (deformation/damage),
+brake thermals. Coming with the damage model and build system.
 
 ---
 
@@ -104,9 +117,11 @@ struct SoftBody {
 ### Key types
 
 ```rust
-struct BeamC { i: usize, j: usize, rest: f32, k: f32, d: f32 }
-struct WheelC { hub: usize, radius: f32, spin: f32, spin_vel: f32, steer: f32,
-                drive_torque: f32, brake: f32, front: bool, steered: bool, tire: TireParams }
+struct BeamC { i: usize, j: usize, rest: f32, k: f32, d: f32, d_rebound: f32,
+               min: f32, max: f32, stop_k: f32 } // dorazy zdvihu + asymetrický tlumič
+struct WheelC { hub: usize, top: Option<usize>, radius: f32, spin: f32, spin_vel: f32,
+                steer: f32, drive_torque: f32, brake: f32, front: bool, steered: bool,
+                tire: TireParams, telem: WheelTelem }
 struct TireParams { normal_stiffness: f32, normal_damping: f32, long: Pacejka, lat: Pacejka }
 struct Pacejka { b: f32, c: f32, e: f32 } // Magic Formula koeficienty
 enum SuspensionKind { Rigid, Coil { arm_k, coil_k }, McPherson { arm_k, strut_k },
@@ -137,6 +152,9 @@ src/
 - [x] Conversion of nodes, beams, **wheels**, triangles to `.veh`
 - [x] CLI: `jbeam-rs input.jbeam -o output.veh`
 - [x] Tested on a real `.jbeam` car (500 nodes, 5871 beams, 4 wheels, 791 triangles)
+- [x] `tools/jbeam_to_veh.py` (in-repo, currently ahead of the Rust crate): slot
+  selection, `$variable` resolution, precompression → `rest`, rebound, brakes,
+  tire sizes — to be ported into `jbeam2veh`
 
 ### `magic-formula`
 - [x] Bevy setup, window, camera, light, flat ground
@@ -178,10 +196,10 @@ src/
 - [x] Pauza (Esc): Pokračovat / Garáž / Hlavní menu
 
 ### NOT yet
-- ❌ Suspension for `.veh` cars (still `Rigid` + placeholder ride height, **parked**)
-- ❌ Beam precompression gradual application (ponytail: deferred, complex + low ROI)
 - ❌ Per-axle tire balance tuning (both axles same Pacejka now)
 - ❌ Tire temps, wear, temperature dynamics
+- ❌ Brake temps (jbeam brake thermals data ready: brakeDiameter/brakeMass/vented-disc —
+  teplota → fade/grip brzd, časem)
 - ❌ Real OSM location, rally checkpoints, multiplayer
 
 ---
@@ -199,8 +217,9 @@ src/
   skidpad + test track (rovinka). Auto is drivable and repeatable.
 - **Tire model** — Pacejka procedural, good enough. Future: tire temps (teplota → grip),
   per-axle balance, wear simulation.
-- **Parked (return after physics stable):** `.veh` car suspension + beam precompression
-  deferral.
+- **`.veh` integration** — ✅ complete: suspension (Coil/McP/DW from garage), wheels
+  from jbeam, beam precompression (springs hold static load), bump stops, rebound
+  damping, per-axle brakes from jbeam. Future: brake temps (jbeam thermals data).
 
 ### Phase 2.5 — UI/UX (design hotový — `Game magic formula UI.zip`, klikací prototyp)
 Struktura obrazovek podle návrhu:
@@ -218,12 +237,10 @@ Struktura obrazovek podle návrhu:
   Backspace clear).
 
 ### Phase 3 — World
-- OSM data loader, SRTM integration, road mesh from OSM ways, one real location.
+- OSM data loader, road mesh from OSM ways, one real location (SRTM elevation already in).
 
-### Phase 3 — World
-- OSM data loader, SRTM elevation → terrain mesh, road mesh from OSM ways, one real location
-
-### Phase 4 — Build system
+### Phase 4 — Build system ← **NEXT** (then game-defining polish: settings, music,
+sounds, better visuals, controls; Phase 3 world after)
 - Part inventory, assembly UI (My Summer Car style), compatibility, tuning (Automation style)
 - The first piece is already alive: `CarBuild` resource + suspension choice in the menu
   (pattern: part = data, resource holds the choice, builder reads — same as `Drivetrain`)

@@ -131,11 +131,12 @@ def resolve(val, jvars):
 def extract(root, offsets={}):
     nodes, beams, wheels, tris = [], [], [], []
     engine, gearbox, axles = None, {}, set()
+    brakes_ax = {}  # 'F'/'R' → (brakeTorque, parkingTorque) z brake partů
     node_off = {}  # node id → nodeOffset partu (střed kola; wheel part má nody lokálně)
     tire_size = {}  # 'F'/'R' → (radius, width): tire part je v common obsahu mimo mod,
                     # ale VELIKOST nese jméno default tire slotu (tire_F_175_65_14_sport)
     if not isinstance(root, dict):
-        return nodes, beams, wheels, tris, engine, gearbox, axles
+        return nodes, beams, wheels, tris, engine, gearbox, axles, brakes_ax
     # Prepass: defaulty proměnných ze sekcí "variables" všech partů (řádek: [name, type,
     # unit, category, default, min, max, …]). Tuning party je mění, ale ty sloty neobsazují.
     jvars = {}
@@ -193,11 +194,12 @@ def extract(root, offsets={}):
         # (beamPrecompression poměr / precompressionRange metry) se přepočte na rest níž.
         rows = part.get("beams")
         if isinstance(rows, list):
-            k, d, pre = 0.0, 0.0, 1.0
+            k, d, dr, pre = 0.0, 0.0, 0.0, 1.0
             for row in rows[1:]:
                 if isinstance(row, dict):
                     k = resolve(row.get("beamSpring"), jvars) if "beamSpring" in row else k
                     d = resolve(row.get("beamDamp"), jvars) if "beamDamp" in row else d
+                    dr = resolve(row.get("beamDampRebound"), jvars) if "beamDampRebound" in row else dr
                     pre = resolve(row.get("beamPrecompression"), jvars) if "beamPrecompression" in row else pre
                     continue
                 if not isinstance(row, list):
@@ -206,10 +208,13 @@ def extract(root, offsets={}):
                     inline = row[2] if len(row) > 2 and isinstance(row[2], dict) else {}
                     ki = resolve(inline.get("beamSpring"), jvars) if "beamSpring" in inline else k
                     di = resolve(inline.get("beamDamp"), jvars) if "beamDamp" in inline else d
+                    dri = resolve(inline.get("beamDampRebound"), jvars) if "beamDampRebound" in inline else dr
                     pi = resolve(inline.get("beamPrecompression"), jvars) if "beamPrecompression" in inline else pre
                     # range (metry) jen inline — v datech se stavově nepoužívá; přebíjí poměr
                     ri = resolve(inline.get("precompressionRange"), jvars)
                     beams.append({"a": row[0], "b": row[1], "stiffness": ki or 0.0, "damping": di or 0.0,
+                                  # rebound jen když je (0 = symetrické) — ať soubor nebobtná
+                                  **({"rebound": dri} if dri else {}),
                                   "_pre": pi, "_rng": ri})
         # KOLA: pressureWheels, sloupce 0/3/4/7 = name/node1/node2/wheelDir.
         # Modifikátory radius/tireWidth stavově (jako beamSpring) — tenhle mod je nemá
@@ -217,18 +222,30 @@ def extract(root, offsets={}):
         rows = part.get("pressureWheels")
         if isinstance(rows, list):
             radius, width = 0.0, 0.0
+            bt, pt = None, None
             for row in rows[1:]:
                 if isinstance(row, dict):
                     if isinstance(row.get("radius"), float):
                         radius = row["radius"]
                     if isinstance(row.get("tireWidth"), float):
                         width = row["tireWidth"]
+                    if "brakeTorque" in row:
+                        bt = resolve(row["brakeTorque"], jvars)
+                    if "parkingTorque" in row:
+                        pt = resolve(row["parkingTorque"], jvars)
                     continue
                 if not isinstance(row, list) or len(row) < 8:
                     continue
                 if isinstance(row[0], str) and isinstance(row[3], str) and isinstance(row[4], str) and isinstance(row[7], float):
                     wheels.append({"name": row[0], "node1": row[3], "node2": row[4], "dir": int(row[7]),
                                    "radius": radius, "width": width})
+            # BRZDY: brake party (fabia_brake_F/R) mají v pressureWheels JEN modifikátory
+            # (žádné wheel řádky) — nápravu nese konec slotType.
+            if bt:
+                st = str(part.get("slotType", ""))
+                axle = "F" if st.endswith("_F") else "R" if st.endswith("_R") else None
+                if axle:
+                    brakes_ax[axle] = (bt, pt or 0.0)
         # TROJÚHELNÍKY: řádky ["a","b","c"]
         rows = part.get("triangles")
         if isinstance(rows, list):
@@ -294,7 +311,7 @@ def extract(root, offsets={}):
             b["rest"] = round(length + rng, 6)
         elif isinstance(pre, float) and pre != 1.0:
             b["rest"] = round(length * pre, 6)
-    return nodes, beams, wheels, tris, engine, gearbox, axles
+    return nodes, beams, wheels, tris, engine, gearbox, axles, brakes_ax
 
 def main():
     src_dir, out_path, name = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -315,7 +332,7 @@ def main():
     chosen, offsets = select_parts(parts)
     print(f"party: {len(parts)} celkem → {len(chosen)} vybraných sloty", file=sys.stderr)
     # 3) extrakce jen z vybraných partů
-    nodes, beams, wheels, tris, engine, gearbox, axles = extract({n: parts[n] for n in chosen}, offsets)
+    nodes, beams, wheels, tris, engine, gearbox, axles, brakes_ax = extract({n: parts[n] for n in chosen}, offsets)
     # dedup nodů podle id — poslední definice vyhrává (override jako v BeamNG)
     before = len(nodes)
     by_id = {}
@@ -324,6 +341,12 @@ def main():
     nodes = list(by_id.values())
     print(f"nody: {before} → {len(nodes)} po deduplikaci", file=sys.stderr)
     vehicle = {"name": name, "version": 1, "nodes": nodes, "beams": beams, "wheels": wheels, "triangles": tris}
+    # Brzdy per náprava z brake partů; parking mívá jen zadní (přední 0).
+    if brakes_ax:
+        f = brakes_ax.get("F", (0.0, 0.0))
+        r = brakes_ax.get("R", (0.0, 0.0))
+        vehicle["brakes"] = {"front": round(f[0], 1), "rear": round(r[0], 1),
+                             "parking": round(r[1] or f[1], 1)}
     if engine:
         vehicle["engine"] = engine
     if gearbox.get("ratios"):
