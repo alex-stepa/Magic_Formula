@@ -621,11 +621,15 @@ pub fn spawn_softbody(
         } else {
             sb.add_beam_damped(i, j, beam.stiffness, beam.damping);
         }
-        // ponytail: předpětí (beam.rest) VYPNUTO — okamžitá aplikace na všech 134 beamů
-        // (i caster/toe/camber) zbortí geometrii zavěšení (kola se stáhnou k sobě).
-        // BeamNG ho najíždí postupně (beamPrecompressionTime); až se .veh integrace
-        // vrátí, aplikovat jen na pružiny (k>0, d=0) nebo s náběhem.
-        let _ = beam.rest;
+        // Předpětí (beam.rest) jen pro čisté pružiny (k>0, d=0): rest > spawn délka
+        // = pružina tlačí ven a nese statickou zátěž → auto sedí v jízdní výšce.
+        // Mount-beamy (motor/výfuk, k obří, d>0) rest ignorují — jejich rest je
+        // kratší než spawn délka a stáhl by geometrii (kola k sobě, viz historie).
+        if let Some(rest) = beam.rest {
+            if beam.stiffness > 0.0 && beam.damping == 0.0 {
+                sb.beams.last_mut().unwrap().rest = rest;
+            }
+        }
     }
 
     // --- A1+A2: KOLA z .veh ---
