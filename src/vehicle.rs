@@ -654,9 +654,17 @@ pub fn spawn_softbody(
         // = pružina tlačí ven a nese statickou zátěž → auto sedí v jízdní výšce.
         // Mount-beamy (motor/výfuk, k obří, d>0) rest ignorují — jejich rest je
         // kratší než spawn délka a stáhl by geometrii (kola k sobě, viz historie).
+        // K tomu dorazy zdvihu (±STOP_TRAVEL, STOP_K jako garáž) — ale kolem STATICKÉ
+        // délky (spawn = jízdní výška), ne kolem restu: statický průhyb (~0.13 m)
+        // > STOP_TRAVEL, doraz u restu by už při spawnu tlačil auto nahoru.
         if let Some(rest) = beam.rest {
             if beam.stiffness > 0.0 && beam.damping == 0.0 {
-                sb.beams.last_mut().unwrap().rest = rest;
+                let b = sb.beams.last_mut().unwrap();
+                let static_len = b.rest; // před přepisem = spawn délka
+                b.rest = rest;
+                b.min = static_len - STOP_TRAVEL;
+                b.max = static_len + STOP_TRAVEL;
+                b.stop_k = STOP_K;
             }
         }
     }
