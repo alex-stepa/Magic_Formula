@@ -542,6 +542,34 @@ pub fn spawn_solver_car(
     );
 }
 
+// Role dolních ramen STEJNĚ jako u test auta (spawn_solver_car): příčné rameno míří
+// k PROTĚJŠÍ straně auta, podélné zrcadlově přes střed rozvoru — obě DLOUHÁ a skoro
+// vodorovná (krátké rameno má dva stabilní stavy a při dopadu se přesmykne → kolo
+// se zbortí do strany). Vybíráme nejbližší nod KAROSERIE k cílovému bodu té geometrie;
+// vlastní úchyty kola z .veh jsou moc blízko hubu, na roli ramen se nehodí.
+fn pick_arms(sb: &SoftBody, body_count: usize, hub: Vec3, mean_z: f32) -> (usize, usize) {
+    let lateral = nearest_body(sb, body_count, Vec3::new(-hub.x, hub.y, hub.z), &[]); // protější strana, stejná výška/z
+    let longitudinal = nearest_body(sb, body_count, Vec3::new(hub.x, hub.y, 2.0 * mean_z - hub.z), &[lateral]); // zrcadlo přes střed rozvoru
+    (lateral, longitudinal)
+}
+
+// Nejbližší nod karoserie k cílovému bodu (exclude = už obsazené role — dva úchyty
+// na stejném nodu by degenerovaly na jedno rameno). body_count > 0 zaručuje volající.
+fn nearest_body(sb: &SoftBody, body_count: usize, target: Vec3, exclude: &[usize]) -> usize {
+    (0..body_count)
+        .filter(|i| !exclude.contains(i))
+        .min_by(|&a, &b| sb.pos[a].distance_squared(target).total_cmp(&sb.pos[b].distance_squared(target)))
+        .unwrap()
+}
+
+// Nejbližší nod těla ASPOŇ min_up nad p — horní úchyt pružiny Coil (.veh nemá
+// suspension nody nad kolem, tak si půjčíme karoserii; blatník je přesně tam).
+fn nearest_above(sb: &SoftBody, body_count: usize, p: Vec3, min_up: f32) -> Option<usize> {
+    (0..body_count)
+        .filter(|&i| sb.pos[i].y > p.y + min_up)
+        .min_by(|&a, &b| sb.pos[a].distance_squared(p).total_cmp(&sb.pos[b].distance_squared(p)))
+}
+
 // BeamNG používá z = nahoru, Bevy y = nahoru. Přehodíme osy, ať auto stojí správně
 // (a zachováme pravotočivost: dopředné +y BeamNG → -z Bevy).
 pub fn veh_pos(p: [f32; 3]) -> Vec3 {
@@ -557,6 +585,7 @@ pub fn spawn_softbody(
     materials: &mut Assets<StandardMaterial>,
     sb: &mut SoftBody,
     dt: &mut Drivetrain,
+    build: &CarBuild,
     path: &str,
     ground_y: f32,
 ) {
@@ -576,7 +605,7 @@ pub fn spawn_softbody(
 
     // Nový spawn = čistý solver (jinak by se sčítala dvě auta do jednoho stavu).
     *sb = SoftBody::default();
-    sb.from_veh = true; // menu dílů (SetSuspension) tohle auto nepřestavuje
+    info!("Zavěšení z garáže: {}", build.suspension.label());
 
     // AXLE nody kol (fw1r…) mají v jbeam jen LOKÁLNÍ souřadnice kola (~[±x,0,0]) —
     // v globálním prostoru nesmysl: visely by na mega-tuhých beamech pod podlahou,
@@ -649,7 +678,7 @@ pub fn spawn_softbody(
 
     // 1. průchod: pro každé kolo poskládej úchyty (sousedi axle nodů, co v solveru
     // existují) a z jejich průměru spočti REÁLNOU pozici hubu.
-    let mut wheels: Vec<(Vec<usize>, Vec3, f32, f32)> = Vec::new(); // (úchyty, hub_pos, radius, width)
+    let mut wheels: Vec<(Vec<usize>, Vec3, f32, f32, f32)> = Vec::new(); // (úchyty, hub_pos, radius, width, half_track)
     for wheel in &vehicle.wheels {
         let mut anchors: Vec<usize> = Vec::new();
         for axle in [wheel.node1.as_str(), wheel.node2.as_str()] {
@@ -662,35 +691,42 @@ pub fn spawn_softbody(
                 }
             }
         }
-        if anchors.is_empty() {
-            continue; // bez úchytů neumíme kolo umístit ani zavěsit
+        if anchors.len() < 2 {
+            continue; // pick_arms chce ≥2 úchyty (a s 1 kolo stejně neumíme zavěsit)
         }
         let mut hub_pos = anchors.iter().map(|&i| sb.pos[i]).sum::<Vec3>() / anchors.len() as f32;
         // Přesný střed kola z .veh (nodeOffset slotu): průměr úchytů ho jen aproximuje —
         // u zadní vlečné nápravy lže o ~0.3 m dopředu (rameno táhne průměr k předku).
-        // x necháváme z úchytů: nese znaménko strany a stejně se tlačí na rozchod níž.
+        // x z úchytů nese jen znaménko strany; |x| = půlrozchod z .veh (konvertor ho
+        // skládá z axle nodů + nodeOffsetu), 0 = starý .veh bez něj → fallback níž.
+        let mut half_track = 0.0;
         if let Some(c) = wheel.center {
             let p = origin + veh_pos(c);
             hub_pos.y = p.y;
             hub_pos.z = p.z;
+            half_track = c[0].abs();
         }
-        // Rozměry z .veh; 0 = data chyběla (tire party mimo mod) → fallback níž.
-        let radius = if wheel.radius > 0.0 { wheel.radius } else { 0.34 };
-        let width = if wheel.width > 0.0 { wheel.width } else { 0.20 };
-        wheels.push((anchors, hub_pos, radius, width));
+        // Rozměry z .veh; 0 = data chyběla (tire party mimo mod). Poloměr pak odvoď
+        // z výšky středu kola nad zemí v klidu (center.z v jbeam, z = nahoru) ≈ poloměr.
+        let radius = if wheel.radius > 0.0 { wheel.radius }
+            else if let Some(c) = wheel.center { veh_pos(c).y }
+            else { 0.34 };
+        // 0.185 = pneu 185/60R14 (její ⌀ 578 mm sedí na center.z 0.288 výš)
+        let width = if wheel.width > 0.0 { wheel.width } else { 0.185 };
+        wheels.push((anchors, hub_pos, radius, width, half_track));
     }
     // Průměrné z hubů → hranice mezi přední (větší z) a zadní (menší z) osou.
-    let mean_z = wheels.iter().map(|(_, p, _, _)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
+    let mean_z = wheels.iter().map(|(_, p, _, _, _)| p.z).sum::<f32>() / wheels.len().max(1) as f32;
 
-    // 2. průchod: hub-node + render disk + zavěšení (Rigid) + WheelC.
-    for &(ref anchors, hub_pos, radius, width) in &wheels {
+    let body_count = node_idx.len(); // nody karoserie = 0..body_count (huby/věže až za nimi)
+    // 2. průchod: hub-node + render disk + zavěšení (podle CarBuild) + WheelC.
+    for &(ref anchors, hub_pos, radius, width, half_track) in &wheels {
         let mut hub_pos = hub_pos;
         // .veh dá kola moc inboard (hub = průměr zatažených suspension nodů). Vytlač je ven
-        // na rozumný rozchod, ať nejsou zastrčená pod karoserií. Rest-length beamů zavěšení
-        // (build_suspension níž) tuhle polohu zafixuje, i když anchory zůstanou inboard.
-        // ponytail: konstanta — reálný rozchod je v jbeam nodeOffset jako $výraz
-        // ($trackwidth…), vyhodnocení proměnných až bude potřeba víc aut.
-        hub_pos.x = hub_pos.x.signum() * 0.80;
+        // na skutečný půlrozchod z .veh (center.x); 0.80 = fallback pro starý .veh bez něj.
+        // Rest-length beamů zavěšení (build_suspension níž) tuhle polohu zafixuje,
+        // i když anchory zůstanou inboard.
+        hub_pos.x = hub_pos.x.signum() * if half_track > 0.0 { half_track } else { 0.80 };
         let front = hub_pos.z > mean_z; // přední osa = +z (přední kola Fabie vyšla na +z)
         let render = commands
             .spawn((
@@ -710,10 +746,77 @@ pub fn spawn_softbody(
         // Hub = nový node; jeho render entita = disk kola (softbody_to_transforms mu
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
         let hub = sb.add_node(hub_pos, hub_mass, render);
-        build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid); // přitáhni hub na suspension nody
+        let mut knuckle = None; // těhlice (jen DW) — WheelC.top, dává disku camber
+        match build.suspension {
+            SuspensionKind::Rigid => build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid),
+            // DW jako u test auta: dolní ramena dlouhá (pick_arms), těhlice nad hubem,
+            // horní A-rameno krátké na nody STEJNÉ strany + příčná výztuha na protější
+            // horní nod (bez ní se top přesmykne — viz build_suspension).
+            kind @ SuspensionKind::DoubleWishbone { .. } => {
+                let (lat, lon) = pick_arms(sb, body_count, hub_pos, mean_z);
+                match nearest_above(sb, body_count, hub_pos, 0.3) {
+                    Some(spring) => {
+                        let kp = hub_pos + Vec3::Y * KNUCKLE_H;
+                        let ke = commands
+                            .spawn((
+                                Mesh3d(node_mesh.clone()),
+                                MeshMaterial3d(node_material.clone()),
+                                Transform::from_translation(kp),
+                                Spawned,
+                            ))
+                            .id();
+                        let top = sb.add_node(kp, 10.0, ke);
+                        let up_f = nearest_body(sb, body_count, kp + Vec3::Z * 0.4, &[]);
+                        let up_r = nearest_body(sb, body_count, kp - Vec3::Z * 0.4, &[up_f]);
+                        let brace = nearest_body(sb, body_count, Vec3::new(-kp.x, kp.y, kp.z), &[up_f, up_r]);
+                        build_suspension(sb, hub, Some(top), &[lat, lon, spring, up_f, up_r, brace], kind);
+                        knuckle = Some(top);
+                    }
+                    None => {
+                        warn!("kolo {}: žádný nod karoserie nad hubem — fallback Rigid", sb.wheels.len());
+                        build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
+                    }
+                }
+            }
+            kind => {
+                let (lat, lon) = pick_arms(sb, body_count, hub_pos, mean_z);
+                // Horní úchyt pružiny: Coil = nejbližší nod karoserie nad kolem (blatník);
+                // McPherson = VĚŽ — nový nod nad hubem, tuze přivázaný ke 4 nejbližším
+                // nodům karoserie (jede s rámem jako pevný úchyt, viz spawn_solver_car).
+                let spring_top = if let SuspensionKind::McPherson { .. } = kind {
+                    let tp = hub_pos + Vec3::new(-hub_pos.x.signum() * STRUT_TOWER_IN, STRUT_TOWER_UP, 0.0);
+                    let te = commands
+                        .spawn((
+                            Mesh3d(node_mesh.clone()),
+                            MeshMaterial3d(node_material.clone()),
+                            Transform::from_translation(tp),
+                            Spawned,
+                        ))
+                        .id();
+                    let t = sb.add_node(tp, 8.0, te);
+                    // ponytail: 4 nejbližší nody karoserie k věži — bez výběru směrů;
+                    // kdyby věž při dropu kývala, vybírat úchyty do kříže jako test auto.
+                    let mut near: Vec<usize> = (0..body_count).collect();
+                    near.sort_by(|&a, &b| sb.pos[a].distance_squared(tp).total_cmp(&sb.pos[b].distance_squared(tp)));
+                    for &n in near.iter().take(4) {
+                        sb.add_beam(t, n, STRUT_TOWER_K);
+                    }
+                    Some(t)
+                } else {
+                    nearest_above(sb, body_count, hub_pos, 0.3)
+                };
+                match spring_top {
+                    Some(top) => build_suspension(sb, hub, None, &[lat, lon, top], kind),
+                    None => {
+                        warn!("kolo {}: žádný nod karoserie nad hubem — fallback Rigid", sb.wheels.len());
+                        build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid);
+                    }
+                }
+            }
+        }
         sb.wheels.push(WheelC {
             hub,
-            top: None, // .veh zavěšení zatím Rigid — kolo vzpřímené s rámem
+            top: knuckle, // Some jen u DW — orientace disku z hub→top (camber)
             render,
             radius,
             spin: 0.0,
@@ -726,6 +829,27 @@ pub fn spawn_softbody(
             tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
             telem: WheelTelem::default(),
         });
+    }
+
+    // Stabilizátory jako u test auta (vše se zdvihem — Rigid ho nemá, V-nod by byl balast).
+    // Páry L/R na nápravu z hubů podle front flagu a znaménka x; links = nody karoserie
+    // nad koly (u test auta horní rohy — tady jejich nejbližší ekvivalent).
+    if !matches!(build.suspension, SuspensionKind::Rigid) {
+        for front in [true, false] {
+            let (mut l, mut r) = (None, None);
+            for w in &sb.wheels {
+                if w.front != front {
+                    continue;
+                }
+                if sb.pos[w.hub].x < 0.0 { l = Some(w.hub) } else { r = Some(w.hub) }
+            }
+            let Some((hl, hr)) = l.zip(r) else { continue }; // náprava bez páru — bez stabilizátoru
+            let (Some(ll), Some(lr)) = (
+                nearest_above(sb, body_count, sb.pos[hl], 0.3),
+                nearest_above(sb, body_count, sb.pos[hr], 0.3),
+            ) else { continue };
+            build_antiroll(commands, sb, &node_mesh, &node_material, hl, hr, ll, lr);
+        }
     }
 
     // --- A3: ChassisFrame z nodů Fabie (směr auta pro solver/kameru/render) ---
