@@ -676,8 +676,11 @@ pub fn spawn_softbody(
             hub_pos.y = p.y;
             hub_pos.z = p.z;
         }
-        // Rozměry z .veh; 0 = data chyběla (tire party mimo mod) → fallback níž.
-        let radius = if wheel.radius > 0.0 { wheel.radius } else { 0.34 };
+        // Rozměry z .veh; 0 = data chyběla (tire party mimo mod). Poloměr pak odvoď
+        // z výšky středu kola nad zemí v klidu (center.z v jbeam, z = nahoru) ≈ poloměr.
+        let radius = if wheel.radius > 0.0 { wheel.radius }
+            else if let Some(c) = wheel.center { veh_pos(c).y }
+            else { 0.34 };
         let width = if wheel.width > 0.0 { wheel.width } else { 0.20 };
         wheels.push((anchors, hub_pos, radius, width));
     }
