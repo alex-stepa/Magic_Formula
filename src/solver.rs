@@ -115,6 +115,13 @@ pub struct TireParams {
 // Změň čísla a `cargo run` — solver je nesahá, jen čte. D (špička) = MU·Fz dynamicky.
 pub const TIRE_LONG: Pacejka = Pacejka { b: 10.0, c: 1.65, e: 0.97 };
 pub const TIRE_LAT: Pacejka = Pacejka { b: 18.0, c: 1.3, e: 0.97 };
+// Výchozí pneumatika (svislý kontakt + obě křivky) — jediné místo; buildery jen kopírují.
+pub const TIRE_DEFAULT: TireParams = TireParams {
+    normal_stiffness: 120_000.0,
+    normal_damping: 4_000.0,
+    long: TIRE_LONG,
+    lat: TIRE_LAT,
+};
 // Spodní mez referenční rychlosti pro normalizaci skluzu (m/s). Brání dělení nulou
 // při rozjezdu z místa — bez ní κ vystřelí a auto exploduje.
 pub const V_LOW: f32 = 2.0;

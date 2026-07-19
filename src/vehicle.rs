@@ -42,6 +42,9 @@ pub const COIL_DAMP_MULT: f32 = 3.5;
 // Hodnoty dle BeamNG (shortBoundRange ~0.065 m, beamLimitSpring ~200k).
 pub const STOP_TRAVEL: f32 = 0.06;
 pub const STOP_K: f32 = 200_000.0;
+// Hub kola = 1 node: disk+pneu+brzda+část těhlice. Data na to nejsou (jbeam tire/rim
+// party jsou v BeamNG common obsahu mimo mod; axle nody mají jen 2×5 kg) → odhad.
+pub const HUB_MASS: f32 = 35.0; // 4× = 140 kg → test auto celkem ~1100 kg
 // Rebound tlumení = REBOUND_MULT × bump (jbeam Fabia: 7500/3500 ≈ 2.1). Tužší rebound
 // drží kolo na zemi po nerovnosti — auto se nehoupe („neplave").
 pub const REBOUND_MULT: f32 = 2.0;
@@ -389,7 +392,6 @@ pub fn spawn_solver_car(
     // --- 4 kola: hub-node (zavěšený na tělo) + render disk ---
     let wheel_radius = 0.34;
     let wheel_width = 0.22;
-    let hub_mass = 35.0; // 4× = 140 kg (kolo+hub+brzda) → celkem ~1100 kg
     let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
     // Sdílená značka u ráfku — kontrastní kostička, ať je vidět otáčení kola.
@@ -420,7 +422,7 @@ pub fn spawn_solver_car(
                 Spawned,
             ))
             .id();
-        let hub = sb.add_node(hub_pos, hub_mass, hub_dbg);
+        let hub = sb.add_node(hub_pos, HUB_MASS, hub_dbg);
         // Úchyty Coil z rohů rámu. Index rohu = 4·(sx>0) + 2·(horní) + 1·(sz>0), dané
         // pořadím stavby těla výš. Ramena do SPODNÍCH rohů (y=1.75 ≈ výška hubu → skoro
         // vodorovná), pružina do horního rohu nad kolem (skoro svislá).
@@ -509,7 +511,7 @@ pub fn spawn_solver_car(
             brake: 0.0,
             front,
             steered,
-            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
+            tire: TIRE_DEFAULT,
             telem: WheelTelem::default(),
         });
     }
@@ -696,7 +698,6 @@ pub fn spawn_softbody(
     // jejich střed NENÍ skutečná poloha kola (přední i zadní by splynuly). Reálnou pozici
     // dostaneme z jejich beam-SOUSEDŮ (= suspension nody fh*/rh*…), co globální pozice mají.
     // Tytéž sousedy = úchyty zavěšení (build_suspension), takže hub na nich rovnou visí.
-    let hub_mass = 35.0;
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
     let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
     let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
@@ -778,7 +779,7 @@ pub fn spawn_softbody(
             .id();
         // Hub = nový node; jeho render entita = disk kola (softbody_to_transforms mu
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
-        let hub = sb.add_node(hub_pos, hub_mass, render);
+        let hub = sb.add_node(hub_pos, HUB_MASS, render);
         let mut knuckle = None; // těhlice (jen DW) — WheelC.top, dává disku camber
         match build.suspension {
             SuspensionKind::Rigid => build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid),
@@ -862,7 +863,7 @@ pub fn spawn_softbody(
             brake: 0.0,
             front,
             steered: front, // přední = řízená (A4 to případně doladí)
-            tire: TireParams { normal_stiffness: 120_000.0, normal_damping: 4_000.0, long: TIRE_LONG, lat: TIRE_LAT },
+            tire: TIRE_DEFAULT,
             telem: WheelTelem::default(),
         });
     }
