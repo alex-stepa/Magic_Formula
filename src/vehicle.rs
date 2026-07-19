@@ -798,11 +798,14 @@ pub fn spawn_softbody(
                         ))
                         .id();
                     let t = sb.add_node(tp, 8.0, te);
-                    // ponytail: 4 nejbližší nody karoserie k věži — bez výběru směrů;
-                    // kdyby věž při dropu kývala, vybírat úchyty do kříže jako test auto.
-                    let mut near: Vec<usize> = (0..body_count).collect();
-                    near.sort_by(|&a, &b| sb.pos[a].distance_squared(tp).total_cmp(&sb.pos[b].distance_squared(tp)));
-                    for &n in near.iter().take(4) {
+                    // Úchyty DO KŘÍŽE jako test auto (spawn_solver_car): podélně dopředu
+                    // i dozadu, protější strana drží bok, nod pod věží drží svisle.
+                    // 4 nejbližší nody byly chumel na jednom místě → věž kývala (shimmy).
+                    let fwd = nearest_body(sb, body_count, tp + Vec3::Z * 0.4, &[]);
+                    let aft = nearest_body(sb, body_count, tp - Vec3::Z * 0.4, &[fwd]);
+                    let side = nearest_body(sb, body_count, Vec3::new(-tp.x, tp.y, tp.z), &[fwd, aft]);
+                    let below = nearest_body(sb, body_count, tp - Vec3::Y * 0.5, &[fwd, aft, side]);
+                    for n in [fwd, aft, side, below] {
                         sb.add_beam(t, n, STRUT_TOWER_K);
                     }
                     Some(t)
