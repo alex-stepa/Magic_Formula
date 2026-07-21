@@ -457,6 +457,7 @@ pub fn build_antiroll(
             MeshMaterial3d(material.clone()),
             Transform::from_translation(apex),
             Spawned,
+            NodeViz,
         ))
         .id();
     // 12 kg ~ skutečný stabilizátor; lehčí nod = tužší uzel vůči hmotě = víc substepů (CFL).
@@ -562,6 +563,7 @@ pub fn spawn_solver_car(
                 MeshMaterial3d(node_material.clone()),
                 Transform::from_translation(hub_pos),
                 Spawned,
+                NodeViz,
             ))
             .id();
         let hub = sb.add_node(hub_pos, hub_mass, hub_dbg);
@@ -581,6 +583,7 @@ pub fn spawn_solver_car(
                     MeshMaterial3d(node_material.clone()),
                     Transform::from_translation(tp),
                     Spawned,
+                    NodeViz,
                 ))
                 .id();
             let t = sb.add_node(tp, 8.0, te);
@@ -602,6 +605,7 @@ pub fn spawn_solver_car(
                     MeshMaterial3d(node_material.clone()),
                     Transform::from_translation(kp),
                     Spawned,
+                    NodeViz,
                 ))
                 .id();
             Some(sb.add_node(kp, 10.0, ke))
@@ -945,6 +949,7 @@ pub fn spawn_softbody(
                                 MeshMaterial3d(node_material.clone()),
                                 Transform::from_translation(kp),
                                 Spawned,
+                                NodeViz,
                             ))
                             .id();
                         let top = sb.add_node(kp, 10.0, ke);
@@ -973,6 +978,7 @@ pub fn spawn_softbody(
                             MeshMaterial3d(node_material.clone()),
                             Transform::from_translation(tp),
                             Spawned,
+                            NodeViz,
                         ))
                         .id();
                     let t = sb.add_node(tp, 8.0, te);
