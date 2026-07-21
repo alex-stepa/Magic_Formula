@@ -1,0 +1,112 @@
+// saves.rs — uložené buildy do player data (player/builds/*.json).
+// Build = laděná výbava (motor spec, zavěšení, převodovka, brzdy, layout, diff, auto).
+// Serializuje se přes serde; std::fs jako zbytek projektu (žádný extra dep).
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::vehicle::{Brakes, CarChoice, Differential, DriveLayout, EngineSpec, Gearbox, Loadout, SuspensionKind};
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SavedBuild {
+    pub name: String,
+    pub car: CarChoice,
+    pub engine: EngineSpec,
+    pub suspension: SuspensionKind,
+    pub gearbox: Gearbox,
+    pub brakes: Brakes,
+    pub layout: DriveLayout,
+    pub front_lock: f32,
+    pub rear_lock: f32,
+}
+
+impl SavedBuild {
+    pub fn from_loadout(l: &Loadout, name: String) -> Self {
+        Self {
+            name,
+            car: l.car,
+            engine: l.engine_spec,
+            suspension: l.suspension,
+            gearbox: l.gearbox.clone(),
+            brakes: l.brakes.clone(),
+            layout: l.layout,
+            front_lock: l.front_diff.lock,
+            rear_lock: l.rear_diff.lock,
+        }
+    }
+    // Namontuj uložený build do výbavy (motor se přegeneruje z spec).
+    pub fn apply(&self, l: &mut Loadout) {
+        l.car = self.car;
+        l.engine_spec = self.engine;
+        l.engine = self.engine.build();
+        l.suspension = self.suspension;
+        l.gearbox = self.gearbox.clone();
+        l.brakes = self.brakes.clone();
+        l.layout = self.layout;
+        l.front_diff = Differential { lock: self.front_lock };
+        l.rear_diff = Differential { lock: self.rear_lock };
+    }
+    // Automatický popisný název: objem + plnění + zavěšení (např. "1.4L NA · Coil").
+    pub fn auto_name(l: &Loadout) -> String {
+        let asp = if l.engine_spec.boost > 0.05 { "Turbo" } else { "NA" };
+        let susp = match l.suspension {
+            SuspensionKind::Rigid => "Rigid",
+            SuspensionKind::Coil { .. } => "Coil",
+            SuspensionKind::McPherson { .. } => "McP",
+            SuspensionKind::DoubleWishbone { .. } => "SLA",
+        };
+        format!("{:.1}L {asp} · {susp} · {}", l.engine_spec.displacement, l.layout.label())
+    }
+}
+
+fn dir() -> PathBuf {
+    PathBuf::from("player/builds")
+}
+
+// Název → bezpečné jméno souboru (alfanumerika + _).
+fn file_stem(name: &str) -> String {
+    name.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect()
+}
+
+pub fn save(b: &SavedBuild) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir())?;
+    let path = dir().join(format!("{}.json", file_stem(&b.name)));
+    std::fs::write(path, serde_json::to_string_pretty(b).unwrap())
+}
+
+pub fn delete(name: &str) {
+    let _ = std::fs::remove_file(dir().join(format!("{}.json", file_stem(name))));
+}
+
+// Načte všechny uložené buildy (seřazené podle jména). Chybný soubor přeskočí.
+pub fn list() -> Vec<SavedBuild> {
+    let mut builds: Vec<SavedBuild> = std::fs::read_dir(dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|s| serde_json::from_str::<SavedBuild>(&s).ok())
+        .collect();
+    builds.sort_by(|a, b| a.name.cmp(&b.name));
+    builds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_build() {
+        let l = Loadout::default();
+        let b = SavedBuild::from_loadout(&l, "test".into());
+        let json = serde_json::to_string(&b).unwrap();
+        let back: SavedBuild = serde_json::from_str(&json).unwrap();
+        let mut l2 = Loadout::default();
+        l2.engine_spec.displacement = 9.9; // rozbij, ať apply prokazatelně vrátí
+        back.apply(&mut l2);
+        assert_eq!(l2.engine_spec, l.engine_spec);
+        assert_eq!(l2.suspension, l.suspension);
+    }
+}

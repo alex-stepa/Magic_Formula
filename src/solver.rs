@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use crate::vehicle::Drivetrain;
+use crate::vehicle::Loadout;
 use crate::world::Terrain;
 
 // --- VLASTNÍ SOFT-BODY SOLVER (Fáze 2) ---
@@ -109,6 +109,10 @@ pub struct TireParams {
     pub normal_damping: f32,   // tlumení svislého kontaktu
     pub long: Pacejka,         // podélná křivka (slip ratio → tah/brzda)
     pub lat: Pacejka,          // boční křivka (slip angle → zatáčení)
+    // Koeficient tření pneumatika↔zem. Strop celkové vodorovné síly = friction·Fz (kruh
+    // adheze): víc, než drží guma, nedá podélnou ani boční sílu (skluz/smyk). Per-pneu →
+    // sportovní kompound zvedne strop gripu, ne jen tvar Pacejka křivky.
+    pub friction: f32,
 }
 
 // --- LADICÍ HODNOTY PNEUMATIKY (vše na jednom místě) ---
@@ -121,6 +125,7 @@ pub const TIRE_DEFAULT: TireParams = TireParams {
     normal_damping: 4_000.0,
     long: TIRE_LONG,
     lat: TIRE_LAT,
+    friction: 1.0,
 };
 // Spodní mez referenční rychlosti pro normalizaci skluzu (m/s). Brání dělení nulou
 // při rozjezdu z místa — bez ní κ vystřelí a auto exploduje.
@@ -141,9 +146,6 @@ pub const GROUND_TOP: f32 = 0.1;
 // Poměr tlumení beamů: 0 = netlumené (zvoní/poskakuje), 1 = kriticky tlumené (mrtvé).
 // Tlumení škálujeme s tuhostí: d = ζ·d_crit = 2·ζ·√(k·μ) — jinak tuhé beamy jen zvoní.
 pub const DAMPING_RATIO: f32 = 0.25;
-// Koeficient tření pneumatika↔zem. Strop celkové vodorovné síly = MU·Fz (kruh adheze):
-// víc, než drží guma, nedá podélnou ani boční sílu (skluz/smyk).
-pub const MU: f32 = 1.0;
 // Max stlačení pneumatiky (metry) — pak „ráfek": tvrdá projekce nad terén. Boční stěna
 // 175/65R14 má ~11 cm, plné sražení už je náraz do ráfku; ~70 % je realistický strop.
 pub const TIRE_MAX_SQUASH: f32 = 0.08;
@@ -245,7 +247,7 @@ pub fn magic_formula(x: f32, p: Pacejka, d: f32) -> f32 {
 // --- SOLVER: semi-implicitní Euler se substeppingem (běží ve FixedUpdate, 64 Hz) ---
 // Jeden snímek rozdělíme na `sb.substeps` malých kroků (adaptivně, viz compute_substeps),
 // aby tuhé beamy zůstaly stabilní (CFL: dt < 2/ω). Reálné tuhosti, žádné škálování.
-pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<Fixed>>, terrain: Res<Terrain>) {
+pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Time<Fixed>>, terrain: Res<Terrain>) {
     if sb.beams.is_empty() {
         return; // nic nespawnuto
     }
@@ -258,7 +260,7 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
     // substepů: 0.9^4 (test auto) je mírné, ale 0.9^382 (velké .veh) = ~0 → každý dotyk přilepí.
     // Přepočítáme faktor tak, aby výsledek za SNÍMEK byl stejný (~0.7) bez ohledu na substepy.
     let tang_keep = 0.7_f32.powf(1.0 / sb.substeps as f32);
-    let (front_lock, rear_lock) = (dt.front_diff.lock, dt.rear_diff.lock); // diff osy
+    let (front_lock, rear_lock) = (loadout.front_diff.lock, loadout.rear_diff.lock); // diff osy
 
     for _ in 0..sb.substeps {
         // 1) vynuluj síly a přidej gravitaci (jen pohyblivým nodům)
@@ -306,6 +308,7 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
             let nd = sb.wheels[wi].tire.normal_damping;
             let long = sb.wheels[wi].tire.long;
             let lat = sb.wheels[wi].tire.lat;
+            let friction = sb.wheels[wi].tire.friction;
             let steer = sb.wheels[wi].steer;
             let m_wheel = 1.0 / sb.inv_mass[hub];
             let i_wheel = 0.5 * m_wheel * radius * radius; // moment setrvačnosti disku
@@ -351,7 +354,7 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
                     let kappa = (roll - v_long) / v_ref; // slip ratio (podélně)
                     let alpha = v_lat.atan2(v_ref); // slip angle v rad (bočně)
 
-                    let d = MU * fy; // špička křivky = μ·Fz (víc guma neudrží)
+                    let d = friction * fy; // špička křivky = μ·Fz (víc guma neudrží)
                     let mut fl = magic_formula(kappa, long, d); // podélná síla (tah/brzda)
                     let mut fc = magic_formula(-alpha, lat, d); // boční síla (brzdí smyk)
 
@@ -364,7 +367,7 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, dt: Res<Drivetrain>, time: Res<Time<
                     }
 
                     // kruh adheze jako pojistka na kombinovaný skluz: |(podélná, boční)| ≤ MU·Fz
-                    let fmax = MU * fy;
+                    let fmax = friction * fy;
                     let mag = (fl * fl + fc * fc).sqrt();
                     if mag > fmax {
                         let s = fmax / mag;

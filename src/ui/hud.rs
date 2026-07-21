@@ -5,16 +5,81 @@ use bevy::prelude::*;
 
 use crate::solver::SoftBody;
 use crate::ui::*;
-use crate::vehicle::Drivetrain;
+use crate::vehicle::{DrivetrainState, Loadout};
 
 pub fn plugin(app: &mut App) {
-    app.add_systems(OnEnter(AppState::Game), spawn_hud)
+    app.init_resource::<AccelTimer>()
+        .add_systems(OnEnter(AppState::Game), spawn_hud)
         .add_systems(OnExit(AppState::Game), |mut p: ResMut<Paused>| p.0 = false)
         .add_systems(
             Update,
             (esc_pause, toggle_telemetry_panel, sync_pause_overlay, pause_buttons, update_dash, update_telemetry)
                 .run_if(in_state(AppState::Game)),
-        );
+        )
+        .add_systems(Update, accel_timer.run_if(in_game_unpaused));
+}
+
+// Měřené 0–100 km/h: nasčítá čas od rozjezdu z místa do 100. Latch po dosažení,
+// rearm při zastavení. Garáž dává odhad, tohle je MĚŘENÍ z reálné jízdy.
+#[derive(Resource, Default)]
+struct AccelTimer {
+    launch: Option<f32>, // čas startu (od rozjezdu), None = nejede / zlatchováno
+    best: Option<f32>,   // poslední změřený čas 0–100
+    latched: bool,       // dosáhlo 100 → neměř znovu dokud nezastaví
+}
+
+fn accel_timer(
+    time: Res<Time>,
+    state: Res<DrivetrainState>,
+    mut t: ResMut<AccelTimer>,
+    mut test: ResMut<crate::vehicle::TestDrive>,
+) {
+    t.tick(state.speed_kmh.abs(), time.elapsed_secs());
+    if t.latched && test.0 {
+        test.0 = false; // dosáhlo 100 → vypni auto-plyn (test dojel)
+    }
+}
+
+impl AccelTimer {
+    // Stavový automat měření: rearm pod 1 km/h, start rozjezdu od 2, latch při 100.
+    fn tick(&mut self, v: f32, now: f32) {
+        if v < 1.0 {
+            self.launch = None;
+            self.latched = false;
+        } else if !self.latched {
+            if self.launch.is_none() && v >= 2.0 {
+                self.launch = Some(now);
+            }
+            if let Some(t0) = self.launch {
+                if v >= 100.0 {
+                    self.best = Some(now - t0);
+                    self.launch = None;
+                    self.latched = true;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod accel_tests {
+    use super::AccelTimer;
+    #[test]
+    fn measures_launch_to_100() {
+        let mut t = AccelTimer::default();
+        t.tick(0.0, 0.0); // stojí
+        t.tick(3.0, 1.0); // rozjezd → launch = 1.0
+        t.tick(50.0, 5.0); // jede
+        t.tick(101.0, 8.5); // překročil 100 → best = 7.5
+        assert_eq!(t.best, Some(7.5));
+        assert!(t.latched);
+        // dokud nezastaví, neměří znovu
+        t.tick(120.0, 12.0);
+        assert_eq!(t.best, Some(7.5));
+        // zastavení rearmuje
+        t.tick(0.0, 20.0);
+        assert!(!t.latched && t.launch.is_none());
+    }
 }
 
 // ── markery ──────────────────────────────────────────────────────────────────
@@ -31,6 +96,8 @@ struct SpeedText;
 struct GearText;
 #[derive(Component)]
 struct StatusText; // SPOJKA / CHCÍPLO — malý řádek v LCD
+#[derive(Component)]
+struct AccelText; // měřené 0–100 km/h
 
 #[derive(Component)]
 struct TelemetryPanel;
@@ -193,6 +260,11 @@ fn spawn_hud(mut commands: Commands, fonts: Res<UiFonts>, map: Res<SelectedMap>)
                                 SpeedText,
                             ));
                             c.spawn(txt("km/h", &fonts.body, 13.0, Color::srgba(0.949, 0.949, 0.953, 0.6)));
+                            c.spawn((
+                                txt("0–100: —", &fonts.mono, 12.0, ACCENT_300),
+                                Node { margin: UiRect::top(Val::Px(4.0)), ..default() },
+                                AccelText,
+                            ));
                         });
                         mid.spawn(Node {
                             flex_direction: FlexDirection::Column,
@@ -451,7 +523,9 @@ fn pause_buttons(
 // Dash: RPM bar + LED + čísla. Prahy jako v návrhu: posledních ~12 % baru
 // a poslední 2 LED = „červená" zóna (accent-200), RPM číslo zčervená u limitu.
 fn update_dash(
-    dt: Res<Drivetrain>,
+    loadout: Res<Loadout>,
+    state: Res<DrivetrainState>,
+    accel: Res<AccelTimer>,
     mut segs: Query<(&RpmSeg, &mut BackgroundColor), (Without<ShiftLed>,)>,
     mut leds: Query<(&ShiftLed, &mut BackgroundColor), (With<ShiftLed>, Without<RpmSeg>)>,
     mut texts: ParamSet<(
@@ -459,10 +533,11 @@ fn update_dash(
         Query<&mut Text, With<SpeedText>>,
         Query<&mut Text, With<GearText>>,
         Query<&mut Text, With<StatusText>>,
+        Query<&mut Text, With<AccelText>>,
     )>,
 ) {
-    let max = dt.engine.max_rpm.max(1.0);
-    let frac = (dt.rpm / max).clamp(0.0, 1.0);
+    let max = loadout.engine.max_rpm.max(1.0);
+    let frac = (state.rpm / max).clamp(0.0, 1.0);
 
     let lit_segs = (frac * SEGMENTS as f32).round() as usize;
     for (RpmSeg(i), mut bg) in &mut segs {
@@ -476,26 +551,33 @@ fn update_dash(
     }
 
     if let Ok((mut text, mut color)) = texts.p0().get_single_mut() {
-        text.0 = format!("{:.0}", dt.rpm);
+        text.0 = format!("{:.0}", state.rpm);
         *color = TextColor(if frac > 0.9 { ACCENT_200 } else { TEXT });
     }
     if let Ok(mut text) = texts.p1().get_single_mut() {
-        text.0 = format!("{:.0}", dt.speed_kmh.abs());
+        text.0 = format!("{:.0}", state.speed_kmh.abs());
     }
     if let Ok(mut text) = texts.p2().get_single_mut() {
-        text.0 = match dt.gear {
+        text.0 = match state.gear {
             -1 => "R".into(),
             0 => "N".into(),
             g => g.to_string(),
         };
     }
     if let Ok(mut text) = texts.p3().get_single_mut() {
-        text.0 = if dt.stalled {
+        text.0 = if state.stalled {
             "CHCÍPLO — nastartuj R".into()
-        } else if dt.clutch < 0.95 {
+        } else if state.clutch < 0.95 {
             "SPOJKA".into()
         } else {
             String::new()
+        };
+    }
+    if let Ok(mut text) = texts.p4().get_single_mut() {
+        text.0 = match (accel.best, accel.launch) {
+            (Some(b), _) => format!("0–100: {b:.1} s"),
+            (None, Some(_)) => "0–100: …".into(),
+            _ => "0–100: —".into(),
         };
     }
 }
@@ -503,7 +585,8 @@ fn update_dash(
 // Telemetrie overlay: per-kolo řádky (jméno FL/FR/RL/RR z rámu) + souhrnné buňky.
 fn update_telemetry(
     sb: Res<SoftBody>,
-    dt: Res<Drivetrain>,
+    loadout: Res<Loadout>,
+    state: Res<DrivetrainState>,
     tel: Res<crate::Telemetry>,
     panel: Query<&Node, With<TelemetryPanel>>,
     mut names: Query<(&TelemName, &mut Text), (Without<TelemCell>, Without<TelemStat>, Without<RecText>)>,
@@ -567,9 +650,9 @@ fn update_telemetry(
             format!("{:.1}", front.iter().map(|w| w.telem.slip_angle.to_degrees().abs()).sum::<f32>() / front.len() as f32),
         )
     };
-    let clutch = if dt.stalled {
+    let clutch = if state.stalled {
         "CHCÍPLO"
-    } else if dt.clutch < 0.95 {
+    } else if state.clutch < 0.95 {
         "ROZP"
     } else {
         "—"
@@ -578,8 +661,8 @@ fn update_telemetry(
     let stat_vals = [
         fz,
         sa,
-        dt.layout.label().to_string(),
-        if dt.rear_diff.lock > 0.5 { "ZAMČ".into() } else { "OTEV".into() },
+        loadout.layout.label().to_string(),
+        if loadout.rear_diff.lock > 0.5 { "ZAMČ".into() } else { "OTEV".into() },
         clutch.to_string(),
         if recording { "●REC".into() } else { "—".into() },
     ];

@@ -1,0 +1,8 @@
+[
+  { "name": "5° silniční", "note": "dlouhé poměry — klid na dálnici",
+    "data": { "gearbox": { "ratios": [3.5, 2.1, 1.4, 1.0, 0.8], "final_drive": 3.9 } } },
+  { "name": "5° rally", "note": "blízké poměry — motor drží v otáčkách",
+    "data": { "gearbox": { "ratios": [2.9, 2.0, 1.5, 1.2, 1.0], "final_drive": 4.4 } } },
+  { "name": "6° závodní", "note": "šest kvaltů, krátký finál",
+    "data": { "gearbox": { "ratios": [3.2, 2.3, 1.8, 1.4, 1.15, 0.95], "final_drive": 4.1 } } }
+]

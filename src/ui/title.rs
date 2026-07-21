@@ -220,7 +220,7 @@ fn spawn_title(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-// Volná jízda → spawn auta podle CarBuild + přepnout do hry. Garáž → Garage.
+// Volná jízda → spawn auta podle Loadout + přepnout do hry. Garáž → Garage.
 fn title_buttons(
     interactions: Query<(&Interaction, &TitleAction), Changed<Interaction>>,
     spawned: Query<Entity, With<crate::vehicle::Spawned>>,
@@ -228,8 +228,10 @@ fn title_buttons(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<crate::solver::SoftBody>,
-    mut drivetrain: ResMut<crate::vehicle::Drivetrain>,
-    build: Res<crate::vehicle::CarBuild>,
+    mut loadout: ResMut<crate::vehicle::Loadout>,
+    mut state: ResMut<crate::vehicle::DrivetrainState>,
+    chassis: Res<crate::vehicle::ChassisParams>,
+    mut test: ResMut<crate::vehicle::TestDrive>,
     terrain: Res<Terrain>,
     mut next: ResMut<NextState<AppState>>,
 ) {
@@ -239,7 +241,8 @@ fn title_buttons(
         }
         match action {
             TitleAction::Drive => {
-                respawn_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, &terrain, &spawned);
+                test.0 = false; // volná jízda = žádný auto-plyn (kdyby zbyl z testu)
+                respawn_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut loadout, &mut state, &chassis, &terrain, &spawned);
                 next.set(AppState::Game);
             }
             TitleAction::Garage => next.set(AppState::Garage),

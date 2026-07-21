@@ -9,6 +9,8 @@ use crate::world::MapKind;
 
 pub mod title;
 pub mod garage;
+pub mod garage_preview;
+pub mod dyno;
 pub mod hud;
 
 // ── Stavy ────────────────────────────────────────────────────────────────────
@@ -75,26 +77,27 @@ pub fn txt(s: impl Into<String>, font: &Handle<Font>, size: f32, color: Color) -
     )
 }
 
-// Smaže stojící auto a spawne nové podle CarBuild (Volná jízda / Vyjet z garáže).
+// Smaže stojící auto a spawne nové podle Loadout (Volná jízda / Vyjet z garáže).
 #[allow(clippy::too_many_arguments)] // parametry = to, co potřebuje spawn_solver_car
 pub fn respawn_car(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     softbody: &mut crate::solver::SoftBody,
-    drivetrain: &mut crate::vehicle::Drivetrain,
-    build: &crate::vehicle::CarBuild,
+    loadout: &mut crate::vehicle::Loadout,
+    state: &mut crate::vehicle::DrivetrainState,
+    chassis: &crate::vehicle::ChassisParams,
     terrain: &crate::world::Terrain,
     spawned: &Query<Entity, With<crate::vehicle::Spawned>>,
 ) {
     crate::clear_spawned(commands, spawned, softbody);
     let ground_y = terrain.0.height(0.0, 0.0);
-    match build.car {
+    match loadout.car {
         crate::vehicle::CarChoice::Veh(i) if crate::available_vehs().get(i).is_some() => {
             let path = crate::available_vehs()[i].to_string_lossy().into_owned();
-            crate::vehicle::spawn_softbody(commands, meshes, materials, softbody, drivetrain, build, &path, ground_y);
+            crate::vehicle::spawn_softbody(commands, meshes, materials, softbody, loadout, state, chassis, &path, ground_y);
         }
-        _ => crate::vehicle::spawn_solver_car(commands, meshes, materials, softbody, drivetrain, build, ground_y),
+        _ => crate::vehicle::spawn_solver_car(commands, meshes, materials, softbody, loadout, state, chassis, ground_y),
     }
 }
 
@@ -117,6 +120,6 @@ impl Plugin for UiPlugin {
             .enable_state_scoped_entities::<AppState>()
             .init_resource::<Paused>()
             .init_resource::<SelectedMap>()
-            .add_plugins((title::plugin, garage::plugin, hud::plugin));
+            .add_plugins((title::plugin, garage::plugin, garage_preview::plugin, dyno::plugin, hud::plugin));
     }
 }
