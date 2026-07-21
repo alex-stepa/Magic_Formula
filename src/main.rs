@@ -11,6 +11,9 @@ mod physics; // načte modul z src/physics.rs (fyzikální komponenty)
 mod veh; // načítání .veh formátu (Fáze 2 — node-beam soft-body)
 mod solver; // jádro fyziky: SoftBody, node-beam solver, tire model
 mod vehicle; // auto: zavěšení, drivetrain, buildery, ovládání
+mod parts; // katalog dílů z JSON (assets/parts) — build systém
+mod saves; // uložené buildy do player data (player/builds)
+mod stats; // odvozené KPI buildu (výkon/hmotnost/rozložení/0–100) — čisté funkce
 mod world; // terén jako trait (rovina / kopce / časem OSM heightfield)
 mod ui; // obrazovky: title / garáž / HUD + pauza (stavový automat)
 
@@ -19,7 +22,8 @@ use vehicle::*;
 use world::{MapKind, Terrain};
 
 fn main() {
-    App::new()
+    let mut app = App::new();
+    app
         // DefaultPlugins = okno, renderer, input, čas... všechno základní.
         // .set(WindowPlugin {...}) jen přenastaví okno (titulek, rozlišení).
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -34,8 +38,11 @@ fn main() {
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         // Startup = spustí se jednou na začátku (postaví scénu).
         .init_resource::<SoftBody>()
-        .init_resource::<Drivetrain>()
-        .init_resource::<CarBuild>()
+        .init_resource::<Loadout>()
+        .init_resource::<DrivetrainState>()
+        .init_resource::<TestDrive>()
+        .init_resource::<ChassisParams>()
+        .insert_resource(parts::load_part_catalog())
         .init_resource::<Terrain>()
         .init_resource::<Telemetry>()
         .add_plugins(ui::UiPlugin)
@@ -56,8 +63,8 @@ fn main() {
                 (softbody_to_transforms, update_softbody_mesh).chain(),
             )
                 .chain(),
-        )
-        .run();
+        );
+    app.run();
 }
 
 // Postaví scénu: kamera, světlo, zem a auto. Běží jednou při startu.
@@ -249,8 +256,9 @@ fn spawn_shortcuts(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut softbody: ResMut<SoftBody>,
-    mut drivetrain: ResMut<Drivetrain>,
-    build: Res<CarBuild>,
+    mut loadout: ResMut<Loadout>,
+    mut state: ResMut<DrivetrainState>,
+    chassis: Res<ChassisParams>,
     terrain: Res<Terrain>,
 ) {
     // Clear = Backspace (Shift+C nešlo: levý Shift je spojka, C kamera — kolize).
@@ -259,14 +267,14 @@ fn spawn_shortcuts(
     }
     let ground_y = terrain.0.height(0.0, 0.0);
     if keys.just_pressed(KeyCode::Digit1) {
-        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, ground_y);
+        spawn_solver_car(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut loadout, &mut state, &chassis, ground_y);
     }
     // Klávesy 2,3,4… = .veh soubory ve stejném pořadí jako UI tlačítka.
     let digits = [KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
     if digits.iter().any(|d| keys.just_pressed(*d)) {
         for (i, path) in available_vehs().iter().enumerate() {
             if i < digits.len() && keys.just_pressed(digits[i]) {
-                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut drivetrain, &build, &path.to_string_lossy(), ground_y);
+                spawn_softbody(&mut commands, &mut meshes, &mut materials, &mut softbody, &mut loadout, &mut state, &chassis, &path.to_string_lossy(), ground_y);
             }
         }
     }
@@ -367,13 +375,15 @@ fn softbody_to_transforms(
 struct Telemetry {
     writer: Option<std::io::BufWriter<std::fs::File>>,
     t: f32,
+    loadout_id: String, // signatura buildu (auto_name) — konstantní per jízda, diff buildů
 }
 
 fn telemetry_log(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     sb: Res<SoftBody>,
-    dt: Res<Drivetrain>,
+    state: Res<DrivetrainState>,
+    loadout: Res<Loadout>,
     mut tel: ResMut<Telemetry>,
 ) {
     use std::io::Write;
@@ -391,10 +401,12 @@ fn telemetry_log(
             match std::fs::File::create(&path) {
                 Ok(f) => {
                     let mut w = std::io::BufWriter::new(f);
-                    let _ = writeln!(w, "t,wheel,front,speed_kmh,fz,slip_ratio,slip_angle_deg,f_long,f_lat");
+                    let _ = writeln!(w, "loadout_id,t,wheel,front,speed_kmh,fz,slip_ratio,slip_angle_deg,f_long,f_lat");
                     tel.writer = Some(w);
                     tel.t = 0.0;
-                    info!("Telemetrie: záznam do {path}");
+                    // signatura buildu (bez čárek, ať nerozbije CSV)
+                    tel.loadout_id = saves::SavedBuild::auto_name(&loadout).replace(',', " ");
+                    info!("Telemetrie: záznam do {path} (build: {})", tel.loadout_id);
                 }
                 Err(e) => warn!("Telemetrie: nelze otevřít soubor ({e})"),
             }
@@ -404,13 +416,14 @@ fn telemetry_log(
         return;
     }
     tel.t += time.delta_secs();
-    let (t, speed) = (tel.t, dt.speed_kmh);
+    let (t, speed) = (tel.t, state.speed_kmh);
     // Kola nakopírovat před půjčením writeru (ResMut vs Res<SoftBody> jsou nezávislé).
     let rows: Vec<_> = sb.wheels.iter().enumerate()
         .map(|(i, w)| (i, w.front, w.telem)).collect();
+    let id = tel.loadout_id.clone();
     let w = tel.writer.as_mut().unwrap();
     for (i, front, tm) in rows {
-        let _ = writeln!(w, "{t:.3},{i},{},{speed:.2},{:.1},{:.4},{:.3},{:.1},{:.1}",
+        let _ = writeln!(w, "{id},{t:.3},{i},{},{speed:.2},{:.1},{:.4},{:.3},{:.1},{:.1}",
             front as u8, tm.fz, tm.slip_ratio, tm.slip_angle.to_degrees(), tm.f_long, tm.f_lat);
     }
 }

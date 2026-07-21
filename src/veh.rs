@@ -1,16 +1,13 @@
 // veh.rs — načtení vlastního .veh formátu do hry.
-// Tady jen Deserialize (umí se NAČÍST z JSON). Zápis dělá konvertor jbeam-rs.
-// Structy se musí shodovat s těmi v jbeam-rs/src/veh.rs (sdílená "smlouva" o formátu).
-
-// allow(dead_code): některá pole (name, version, wheels) zatím nečteme.
-#![allow(dead_code)]
+// Tady jen Deserialize (umí se NAČÍST z JSON). Zápis dělá konvertor.
+// Jen pole, co hra ČTE — ostatní klíče formátu (version, wheels.name/dir…)
+// serde tiše ignoruje; plný formát dokumentuje README.
 
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Vehicle {
     pub name: String,
-    pub version: u32,
     pub nodes: Vec<Node>,
     pub beams: Vec<Beam>,
     #[serde(default)] // kdyby .veh sekci wheels neměl, bude prázdná
@@ -21,6 +18,7 @@ pub struct Vehicle {
     // .veh formát je psaný na míru, zrcadlové structy by byly jen opisování.
     pub engine: Option<crate::vehicle::Engine>,
     pub gearbox: Option<crate::vehicle::Gearbox>,
+    pub brakes: Option<crate::vehicle::Brakes>,
     pub layout: Option<crate::vehicle::DriveLayout>,
 }
 
@@ -47,6 +45,9 @@ pub struct Beam {
     pub stiffness: f32,
     #[serde(default)]
     pub damping: f32,
+    // Tlumení při natahování (jbeam beamDampRebound); 0 = symetrické (= damping).
+    #[serde(default)]
+    pub rebound: f32,
     // Klidová délka s předpětím (jbeam beamPrecompression/precompressionRange).
     // None = klidová délka je vzdálenost nodů při spawnu (většina beamů).
     pub rest: Option<f32>,
@@ -78,10 +79,8 @@ mod tests {
 
 #[derive(Debug, Deserialize)]
 pub struct Wheel {
-    pub name: String,
     pub node1: String,
     pub node2: String,
-    pub dir: i32,
     // Rozměry z jbeam pressureWheels (radius/tireWidth). 0 = v datech nebyly
     // (tire party bývají v BeamNG common obsahu mimo mod) → hra dosadí fallback.
     #[serde(default)]

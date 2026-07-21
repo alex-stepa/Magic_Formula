@@ -1,7 +1,9 @@
 target/
 *.zip
 *.hgt
-assets/fabia.veh
 
 # telemetrie z ladění (per-jízda CSV)
 telemetry/
+
+# uložené buildy hráče (player data)
+player/
