@@ -16,6 +16,10 @@ use crate::veh;
 #[derive(Component)]
 pub struct Spawned;
 
+// Marker na render kuličkách nodů — Visibility se syncuje s telemetry panelem (viz hud.rs).
+#[derive(Component)]
+pub struct NodeViz;
+
 // Viditelný trup auta (kvádr). Nemá vlastní fyziku — jeho Transform každý snímek
 // přepíšeme z orientace rámu (chassis), ať „sedí" na uzlech soft-body.
 #[derive(Component)]
@@ -369,6 +373,7 @@ pub fn spawn_solver_car(
                         MeshMaterial3d(node_material.clone()),
                         Transform::from_translation(p),
                         Spawned,
+                        NodeViz,
                     ))
                     .id();
                 let idx = sb.add_node(p, body_mass, e);
@@ -633,6 +638,7 @@ pub fn spawn_softbody(
                 MeshMaterial3d(node_material.clone()),
                 Transform::from_translation(origin + veh_pos(node.pos)),
                 Spawned, // ať to umí Clear smazat
+                NodeViz,
             ))
             .id();
         let i = sb.add_node(origin + veh_pos(node.pos), node.mass, entity);

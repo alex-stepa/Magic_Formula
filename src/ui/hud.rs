@@ -12,7 +12,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(OnExit(AppState::Game), |mut p: ResMut<Paused>| p.0 = false)
         .add_systems(
             Update,
-            (esc_pause, toggle_telemetry_panel, sync_pause_overlay, pause_buttons, update_dash, update_telemetry)
+            (esc_pause, toggle_telemetry_panel, sync_node_viz, sync_pause_overlay, pause_buttons, update_dash, update_telemetry)
                 .run_if(in_state(AppState::Game)),
         );
 }
@@ -422,6 +422,21 @@ fn toggle_telemetry_panel(
     }
     for mut node in &mut panel {
         node.display = if node.display == Display::None { Display::Flex } else { Display::None };
+    }
+}
+
+// Node kuličky vidět jen když je telemetry panel zobrazený. Sync každý frame (ne flip na T),
+// ať to sedí i po respawnu auta, kdy nová kulička vznikne Visibility::Inherited (= vidět).
+fn sync_node_viz(
+    panel: Query<&Node, With<TelemetryPanel>>,
+    mut nodes: Query<&mut Visibility, With<crate::vehicle::NodeViz>>,
+) {
+    let Ok(panel) = panel.get_single() else { return };
+    let want = if panel.display == Display::None { Visibility::Hidden } else { Visibility::Visible };
+    for mut v in &mut nodes {
+        if *v != want {
+            *v = want;
+        }
     }
 }
 
