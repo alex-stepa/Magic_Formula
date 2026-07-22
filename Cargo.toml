@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.15"
+# cpal přímo (obchází Bevy audio ~250ms buffer/latenci — engine zvuk potřebuje nízkou
+# latenci a jemnou kontrolu). cpal je i tranzitivní dep rodia; verze musí sedět.
+cpal = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bevy_rapier3d = { version = "0.28", features = ["debug-render-3d"] }

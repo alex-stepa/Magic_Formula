@@ -16,6 +16,7 @@ mod saves; // uložené buildy do player data (player/builds)
 mod stats; // odvozené KPI buildu (výkon/hmotnost/rozložení/0–100) — čisté funkce
 mod world; // terén jako trait (rovina / kopce / časem OSM heightfield)
 mod ui; // obrazovky: title / garáž / HUD + pauza (stavový automat)
+mod audio; // procedurální zvuk motoru (reaguje na rpm/válce/config)
 
 use solver::*;
 use vehicle::*;
@@ -46,6 +47,7 @@ fn main() {
         .init_resource::<Terrain>()
         .init_resource::<Telemetry>()
         .add_plugins(ui::UiPlugin)
+        .add_plugins(audio::EngineSoundPlugin)
         .add_systems(Startup, setup)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
         // Běží jen ve hře a mimo pauzu — na title/garáži/pauze svět stojí.
