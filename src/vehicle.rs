@@ -89,6 +89,10 @@ pub enum SuspensionKind {
     // Dvě roviny ramen + těhlice (top nod nad hubem): dolní ramena na hub, horní na top,
     // pružina na hub. Kolo má orientaci z hub→top = skutečný camber (viz KNUCKLE_*).
     DoubleWishbone { arm_k: f32, spring_k: f32 },
+    // Vlečná náprava (twist beam) — reálná zadní náprava Fabie MK1. Předek McPherson
+    // (nezávislý), zadek: vlečná ramena + pružina + PŘÍČNÝ beam mezi zadními huby (twist
+    // beam) = semi-independent + zabudovaný anti-roll (nahrazuje V-nod stabilizátor vzadu).
+    TorsionBeam { arm_k: f32, spring_k: f32 },
     // LeafSpring { ... } — časem
 }
 
@@ -102,6 +106,7 @@ impl SuspensionKind {
             Self::Coil { .. } => "Coil (zdvih)",
             Self::McPherson { .. } => "McPherson (vzpěra)",
             Self::DoubleWishbone { .. } => "Double wishbone (camber)",
+            Self::TorsionBeam { .. } => "TorsionBeam (vlečná)",
         }
     }
 
@@ -111,12 +116,16 @@ impl SuspensionKind {
             Self::Coil { coil_k, .. } => coil_k,
             Self::McPherson { strut_k, .. } => strut_k,
             Self::DoubleWishbone { spring_k, .. } => spring_k,
+            Self::TorsionBeam { spring_k, .. } => spring_k,
             Self::Rigid => 0.0,
         }
     }
     pub fn arm(self) -> f32 {
         match self {
-            Self::Coil { arm_k, .. } | Self::McPherson { arm_k, .. } | Self::DoubleWishbone { arm_k, .. } => arm_k,
+            Self::Coil { arm_k, .. }
+            | Self::McPherson { arm_k, .. }
+            | Self::DoubleWishbone { arm_k, .. }
+            | Self::TorsionBeam { arm_k, .. } => arm_k,
             Self::Rigid => 0.0,
         }
     }
@@ -125,6 +134,7 @@ impl SuspensionKind {
             Self::Coil { arm_k, .. } => Self::Coil { arm_k, coil_k: v },
             Self::McPherson { arm_k, .. } => Self::McPherson { arm_k, strut_k: v },
             Self::DoubleWishbone { arm_k, .. } => Self::DoubleWishbone { arm_k, spring_k: v },
+            Self::TorsionBeam { arm_k, .. } => Self::TorsionBeam { arm_k, spring_k: v },
             Self::Rigid => Self::Rigid,
         }
     }
@@ -133,6 +143,7 @@ impl SuspensionKind {
             Self::Coil { coil_k, .. } => Self::Coil { arm_k: v, coil_k },
             Self::McPherson { strut_k, .. } => Self::McPherson { arm_k: v, strut_k },
             Self::DoubleWishbone { spring_k, .. } => Self::DoubleWishbone { arm_k: v, spring_k },
+            Self::TorsionBeam { spring_k, .. } => Self::TorsionBeam { arm_k: v, spring_k },
             Self::Rigid => Self::Rigid,
         }
     }
@@ -156,7 +167,8 @@ pub enum CarChoice {
 #[derive(Resource)]
 pub struct Loadout {
     pub car: CarChoice,
-    pub suspension: SuspensionKind,
+    pub front_susp: SuspensionKind, // zavěšení přední nápravy
+    pub rear_susp: SuspensionKind,  // zavěšení zadní nápravy
     pub engine_spec: EngineSpec,  // laděný parametry (slidery v garáži) → generuje engine
     pub engine: Engine,           // vygenerovaný z engine_spec (cache pro solver/HUD)
     pub gearbox: Gearbox,         // namontovaná převodovka
@@ -168,11 +180,23 @@ pub struct Loadout {
     pub rear_diff: Differential,  // diff zadní osy
 }
 
+impl Loadout {
+    // Zavěšení dané nápravy (front=true přední). Spawn staví každé kolo dle své nápravy,
+    // takže lze míchat (např. McPherson předek + TorsionBeam zadek).
+    pub fn susp(&self, front: bool) -> SuspensionKind {
+        if front { self.front_susp } else { self.rear_susp }
+    }
+    pub fn set_susp(&mut self, front: bool, k: SuspensionKind) {
+        if front { self.front_susp = k } else { self.rear_susp = k }
+    }
+}
+
 impl Default for Loadout {
     fn default() -> Self {
         Self {
             car: CarChoice::TestCar,
-            suspension: SuspensionKind::COIL,
+            front_susp: SuspensionKind::COIL,
+            rear_susp: SuspensionKind::COIL,
             engine_spec: EngineSpec::default(),
             engine: EngineSpec::default().build(),
             gearbox: Gearbox { ratios: vec![3.5, 2.1, 1.4, 1.0, 0.8], final_drive: 3.9 },
@@ -515,8 +539,11 @@ pub fn build_suspension(sb: &mut SoftBody, hub: usize, top: Option<usize>, ancho
         // z DAMPING_RATIO: měkčí k → úměrně menší d, poměrově tlumené stejně.
         // McPherson = stejná topologie, jen anchors[2] je VĚŽ (staví ji spawn_solver_car)
         // místo rohu rámu → vzpěra ~svislá, celé strut_k nese váhu.
+        // TorsionBeam = stejná 3-beam topologie; per-wheel top rozliší předek (věž,
+        // McPherson-like) od zadku (horní roh, Coil-like) — viz spawn_solver_car.
         SuspensionKind::Coil { arm_k, coil_k }
-        | SuspensionKind::McPherson { arm_k, strut_k: coil_k } => {
+        | SuspensionKind::McPherson { arm_k, strut_k: coil_k }
+        | SuspensionKind::TorsionBeam { arm_k, spring_k: coil_k } => {
             sb.add_beam(hub, anchors[0], arm_k);
             sb.add_beam(hub, anchors[1], arm_k);
             sb.add_beam(hub, anchors[2], coil_k);
@@ -686,7 +713,10 @@ pub fn spawn_solver_car(
         // Horní úchyt pružiny: Coil → roh rámu; McPherson → VĚŽ = nový nod nad hubem,
         // tuze svázaný 4 beamy s rohy (jede s rámem jako pevný úchyt). Vzpěra na věž
         // vyjde ~11° od svislice → celé strut_k nese váhu (roh rámu dá jen ~0.55·k).
-        let top = if let SuspensionKind::McPherson { .. } = loadout.suspension {
+        // Věž staví McPherson vždy; TorsionBeam jen pro přední kolo (předek = McPherson,
+        // zadek vlečná náprava → horní roh jak Coil).
+        let build_tower = matches!(loadout.susp(front), SuspensionKind::McPherson { .. });
+        let top = if build_tower {
             let tp = hub_pos + Vec3::new(-sx * STRUT_TOWER_IN, STRUT_TOWER_UP, 0.0);
             let te = commands
                 .spawn((
@@ -708,7 +738,7 @@ pub fn spawn_solver_car(
         };
         // Těhlice (jen DoubleWishbone): top nod nad hubem — na něm visí horní A-rameno
         // a jeho poloha vůči hubu dává disku odklon (camber) v renderu.
-        let knuckle = if let SuspensionKind::DoubleWishbone { .. } = loadout.suspension {
+        let knuckle = if let SuspensionKind::DoubleWishbone { .. } = loadout.susp(front) {
             let kp = hub_pos + Vec3::Y * KNUCKLE_H;
             let ke = commands
                 .spawn((
@@ -733,11 +763,11 @@ pub fn spawn_solver_car(
         ];
         // Rigid potřebuje VŠECH 8 nodů (šikmé beamy do všech směrů = tuhý zámek);
         // se 3 skoro-vodorovnými úchyty by svisle skoro nedržel a houpal se.
-        let rigid_anchors: &[usize] = match loadout.suspension {
+        let rigid_anchors: &[usize] = match loadout.susp(front) {
             SuspensionKind::Rigid => &body,
             _ => &anchors,
         };
-        build_suspension(sb, hub, knuckle, rigid_anchors, loadout.suspension);
+        build_suspension(sb, hub, knuckle, rigid_anchors, loadout.susp(front));
 
         let render = commands
             .spawn((
@@ -776,11 +806,22 @@ pub fn spawn_solver_car(
 
     // Stabilizátory předek + zadek (vše se zdvihem — Rigid ho nemá, V-nod by byl balast).
     // Pořadí wheels = wheel_layout: [0] FL, [1] FR, [2] RL, [3] RR.
-    if !matches!(loadout.suspension, SuspensionKind::Rigid) {
-        let (fl, fr) = (sb.wheels[0].hub, sb.wheels[1].hub);
-        let (rl, rr) = (sb.wheels[2].hub, sb.wheels[3].hub);
-        build_antiroll(commands, sb, &node_mesh, &node_material, fl, fr, body[3], body[7]);
-        build_antiroll(commands, sb, &node_mesh, &node_material, rl, rr, body[2], body[6]);
+    // Stabilizátor per náprava dle jejího kindu: Rigid nemá (V-nod by byl balast),
+    // TorsionBeam = tuhý příčný beam mezi huby (zabudovaný anti-roll vlečné nápravy),
+    // ostatní = V-nod. Links = horní rohy nad danou nápravou.
+    let (fl, fr) = (sb.wheels[0].hub, sb.wheels[1].hub);
+    let (rl, rr) = (sb.wheels[2].hub, sb.wheels[3].hub);
+    for (kind, hl, hr, ll, lr) in [
+        (loadout.front_susp, fl, fr, body[3], body[7]),
+        (loadout.rear_susp, rl, rr, body[2], body[6]),
+    ] {
+        match kind {
+            SuspensionKind::Rigid => {}
+            SuspensionKind::TorsionBeam { spring_k, .. } => {
+                sb.add_beam(hl, hr, spring_k * 2.0);
+            }
+            _ => build_antiroll(commands, sb, &node_mesh, &node_material, hl, hr, ll, lr),
+        }
     }
 
     // Viditelný trup: kvádr velikosti rámu. Transform mu přepisuje softbody_to_transforms.
@@ -885,7 +926,7 @@ pub fn spawn_softbody(
 
     // Nový spawn = čistý solver (jinak by se sčítala dvě auta do jednoho stavu).
     *sb = SoftBody::default();
-    info!("Zavěšení z garáže: {}", loadout.suspension.label());
+    info!("Zavěšení z garáže: předek {} / zadek {}", loadout.front_susp.label(), loadout.rear_susp.label());
 
     // AXLE nody kol (fw1r…) mají v jbeam jen LOKÁLNÍ souřadnice kola (~[±x,0,0]) —
     // v globálním prostoru nesmysl: visely by na mega-tuhých beamech pod podlahou,
@@ -1058,7 +1099,7 @@ pub fn spawn_softbody(
         // dá pozici i rotaci, takže žádná zvlášť debug kulička není potřeba).
         let hub = sb.add_node(hub_pos, hub_mass, render);
         let mut knuckle = None; // těhlice (jen DW) — WheelC.top, dává disku camber
-        match loadout.suspension {
+        match loadout.susp(front) {
             SuspensionKind::Rigid => build_suspension(sb, hub, None, anchors, SuspensionKind::Rigid),
             // DW jako u test auta: dolní ramena dlouhá (pick_arms), těhlice nad hubem,
             // horní A-rameno krátké na nody STEJNÉ strany + příčná výztuha na protější
@@ -1095,7 +1136,9 @@ pub fn spawn_softbody(
                 // Horní úchyt pružiny: Coil = nejbližší nod karoserie nad kolem (blatník);
                 // McPherson = VĚŽ — nový nod nad hubem, tuze přivázaný ke 4 nejbližším
                 // nodům karoserie (jede s rámem jako pevný úchyt, viz spawn_solver_car).
-                let spring_top = if let SuspensionKind::McPherson { .. } = kind {
+                // Věž staví jen McPherson (té nápravy); ostatní kindy horní roh jak Coil.
+                let build_tower = matches!(kind, SuspensionKind::McPherson { .. });
+                let spring_top = if build_tower {
                     let tp = hub_pos + Vec3::new(-hub_pos.x.signum() * STRUT_TOWER_IN, STRUT_TOWER_UP, 0.0);
                     let te = commands
                         .spawn((
@@ -1151,8 +1194,12 @@ pub fn spawn_softbody(
     // Stabilizátory jako u test auta (vše se zdvihem — Rigid ho nemá, V-nod by byl balast).
     // Páry L/R na nápravu z hubů podle front flagu a znaménka x; links = nody karoserie
     // nad koly (u test auta horní rohy — tady jejich nejbližší ekvivalent).
-    if !matches!(loadout.suspension, SuspensionKind::Rigid) {
+    {
         for front in [true, false] {
+            let kind = loadout.susp(front);
+            if matches!(kind, SuspensionKind::Rigid) {
+                continue; // Rigid stabilizátor nemá
+            }
             let (mut l, mut r) = (None, None);
             for w in &sb.wheels {
                 if w.front != front {
@@ -1161,6 +1208,12 @@ pub fn spawn_softbody(
                 if sb.pos[w.hub].x < 0.0 { l = Some(w.hub) } else { r = Some(w.hub) }
             }
             let Some((hl, hr)) = l.zip(r) else { continue }; // náprava bez páru — bez stabilizátoru
+            // TorsionBeam: tuhý příčný beam mezi huby (twist beam) místo V-nod antirollu
+            // — zabudovaný anti-roll vlečné nápravy.
+            if let SuspensionKind::TorsionBeam { spring_k, .. } = kind {
+                sb.add_beam(hl, hr, spring_k * 2.0);
+                continue;
+            }
             let (Some(ll), Some(lr)) = (
                 nearest_above(sb, body_count, sb.pos[hl], 0.3),
                 nearest_above(sb, body_count, sb.pos[hr], 0.3),

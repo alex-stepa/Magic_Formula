@@ -13,7 +13,10 @@ pub struct SavedBuild {
     pub name: String,
     pub car: CarChoice,
     pub engine: EngineSpec,
-    pub suspension: SuspensionKind,
+    #[serde(default = "default_susp")]
+    pub front_susp: SuspensionKind,
+    #[serde(default = "default_susp")]
+    pub rear_susp: SuspensionKind,
     pub gearbox: Gearbox,
     pub brakes: Brakes,
     pub layout: DriveLayout,
@@ -27,7 +30,8 @@ impl SavedBuild {
             name,
             car: l.car,
             engine: l.engine_spec,
-            suspension: l.suspension,
+            front_susp: l.front_susp,
+            rear_susp: l.rear_susp,
             gearbox: l.gearbox.clone(),
             brakes: l.brakes.clone(),
             layout: l.layout,
@@ -40,7 +44,8 @@ impl SavedBuild {
         l.car = self.car;
         l.engine_spec = self.engine;
         l.engine = self.engine.build();
-        l.suspension = self.suspension;
+        l.front_susp = self.front_susp;
+        l.rear_susp = self.rear_susp;
         l.gearbox = self.gearbox.clone();
         l.brakes = self.brakes.clone();
         l.layout = self.layout;
@@ -50,11 +55,18 @@ impl SavedBuild {
     // Automatický popisný název: objem + plnění + zavěšení (např. "1.4L NA · Coil").
     pub fn auto_name(l: &Loadout) -> String {
         let asp = if l.engine_spec.boost > 0.05 { "Turbo" } else { "NA" };
-        let susp = match l.suspension {
+        let code = |k: SuspensionKind| match k {
             SuspensionKind::Rigid => "Rigid",
             SuspensionKind::Coil { .. } => "Coil",
             SuspensionKind::McPherson { .. } => "McP",
             SuspensionKind::DoubleWishbone { .. } => "SLA",
+            SuspensionKind::TorsionBeam { .. } => "TB",
+        };
+        // Stejné vpředu i vzadu → jeden kód; jinak "předek/zadek".
+        let susp = if l.front_susp.same_variant(l.rear_susp) {
+            code(l.front_susp).to_string()
+        } else {
+            format!("{}/{}", code(l.front_susp), code(l.rear_susp))
         };
         format!("{:.1}L {asp} · {susp} · {}", l.engine_spec.displacement, l.layout.label())
     }
@@ -62,6 +74,11 @@ impl SavedBuild {
 
 fn dir() -> PathBuf {
     PathBuf::from("player/builds")
+}
+
+// Fallback pro staré save soubory bez front_susp/rear_susp polí.
+fn default_susp() -> SuspensionKind {
+    SuspensionKind::COIL
 }
 
 // Název → bezpečné jméno souboru (alfanumerika + _).
@@ -107,6 +124,7 @@ mod tests {
         l2.engine_spec.displacement = 9.9; // rozbij, ať apply prokazatelně vrátí
         back.apply(&mut l2);
         assert_eq!(l2.engine_spec, l.engine_spec);
-        assert_eq!(l2.suspension, l.suspension);
+        assert_eq!(l2.front_susp, l.front_susp);
+        assert_eq!(l2.rear_susp, l.rear_susp);
     }
 }

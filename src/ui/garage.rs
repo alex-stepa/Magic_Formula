@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use crate::parts::{PartCatalog, PartCategory};
+use crate::parts::{PartCatalog, PartCategory, PartData};
 use crate::ui::*;
 use crate::vehicle::{CarChoice, DriveLayout, DrivetrainState, EngineConfig, Loadout};
 use crate::world::Terrain;
@@ -54,7 +54,8 @@ enum GarageAction {
     Drive,
     Test, // vyjet s auto-plynem (měření 0–100)
     Tab(GarageTab),
-    Part(usize), // index do PartCatalog
+    Part(usize), // index do PartCatalog (celoautové kategorie)
+    SuspPart { idx: usize, front: bool }, // zavěšení na konkrétní nápravu
     Layout(DriveLayout),
     DiffLock(bool),
     Car(CarChoice),
@@ -81,6 +82,10 @@ struct TabContent(GarageTab);
 // Tag „osazeno" u karty dílu (Display podle is_selected daného indexu katalogu).
 #[derive(Component, Clone, Copy)]
 struct PartTag(usize);
+
+// Tag „osazeno" u karty zavěšení — highlight dle nápravy (idx katalogu, front).
+#[derive(Component, Clone, Copy)]
+struct SuspTag(usize, bool);
 
 // Hodnota v spec tabulce (index řádku) + caption pod obrázkem auta.
 #[derive(Component, Clone, Copy)]
@@ -114,8 +119,8 @@ enum SliderKind {
     Redline,
     Boost,
     Cylinders,
-    SuspSpring,
-    SuspArm,
+    SuspSpring(bool), // bool = přední náprava
+    SuspArm(bool),
     BrakeBias,  // podíl brzdné síly na přední osu (0..1)
     BrakePower, // celková brzdná síla (front+rear, Nm)
 }
@@ -127,8 +132,8 @@ impl SliderKind {
             SliderKind::Redline => (5000.0, 9000.0),
             SliderKind::Boost => (0.0, 1.5),
             SliderKind::Cylinders => (3.0, 12.0),
-            SliderKind::SuspSpring => (40_000.0, 250_000.0),
-            SliderKind::SuspArm => (80_000.0, 300_000.0),
+            SliderKind::SuspSpring(_) => (40_000.0, 250_000.0),
+            SliderKind::SuspArm(_) => (80_000.0, 300_000.0),
             SliderKind::BrakeBias => (0.4, 0.8),
             SliderKind::BrakePower => (800.0, 3000.0),
         }
@@ -143,8 +148,8 @@ impl SliderKind {
             SliderKind::Redline => l.engine_spec.redline,
             SliderKind::Boost => l.engine_spec.boost,
             SliderKind::Cylinders => l.engine_spec.cylinders as f32,
-            SliderKind::SuspSpring => l.suspension.spring(),
-            SliderKind::SuspArm => l.suspension.arm(),
+            SliderKind::SuspSpring(f) => l.susp(f).spring(),
+            SliderKind::SuspArm(f) => l.susp(f).arm(),
             SliderKind::BrakeBias => if total > 0.0 { l.brakes.front / total } else { 0.6 },
             SliderKind::BrakePower => total,
         }
@@ -155,8 +160,8 @@ impl SliderKind {
             SliderKind::Redline => l.engine_spec.redline = (v / 100.0).round() * 100.0,
             SliderKind::Boost => l.engine_spec.boost = v,
             SliderKind::Cylinders => l.engine_spec.cylinders = v.round() as u8,
-            SliderKind::SuspSpring => l.suspension = l.suspension.with_spring(v),
-            SliderKind::SuspArm => l.suspension = l.suspension.with_arm(v),
+            SliderKind::SuspSpring(f) => { let k = l.susp(f).with_spring(v); l.set_susp(f, k); }
+            SliderKind::SuspArm(f) => { let k = l.susp(f).with_arm(v); l.set_susp(f, k); }
             // bias/power přerozdělí front/rear (parking beze změny)
             SliderKind::BrakeBias => {
                 let total = l.brakes.front + l.brakes.rear;
@@ -177,7 +182,7 @@ impl SliderKind {
             SliderKind::Redline => format!("{v:.0} ot/min"),
             SliderKind::Boost => if v < 0.05 { "atmosf.".into() } else { format!("{v:.2} bar") },
             SliderKind::Cylinders => format!("{v:.0} válců"),
-            SliderKind::SuspSpring | SliderKind::SuspArm => format!("{:.0} kN/m", v / 1000.0),
+            SliderKind::SuspSpring(_) | SliderKind::SuspArm(_) => format!("{:.0} kN/m", v / 1000.0),
             SliderKind::BrakeBias => format!("{:.0}/{:.0}", v * 100.0, (1.0 - v) * 100.0),
             SliderKind::BrakePower => format!("{v:.0} Nm"),
         }
@@ -195,11 +200,16 @@ struct SliderLabel(SliderKind);
 const SPEC_ROWS: [&str; 7] = ["Nody / nodes", "Beamy / beams", "Trojúhelníky", "Kola / wheels", "Zavěšení", "Pohon", "Diferenciál"];
 
 // Karty dílů jedné kategorie z katalogu (generický PartPicker — nový díl = JSON entry).
-fn spawn_cards(l: &mut ChildBuilder, catalog: &PartCatalog, cat: PartCategory, fonts: &UiFonts) {
+// axle=None → celoautová kategorie (Part); Some(front) → zavěšení na danou nápravu (SuspPart).
+fn spawn_cards(l: &mut ChildBuilder, catalog: &PartCatalog, cat: PartCategory, fonts: &UiFonts, axle: Option<bool>) {
     for (i, opt) in catalog.0.iter().enumerate().filter(|(_, o)| o.data.category() == cat) {
+        let action = match axle {
+            Some(front) => GarageAction::SuspPart { idx: i, front },
+            None => GarageAction::Part(i),
+        };
         l.spawn((
             Button,
-            GarageAction::Part(i),
+            action,
             Node {
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::axes(Val::Px(12.0), Val::Px(10.0)),
@@ -213,16 +223,19 @@ fn spawn_cards(l: &mut ChildBuilder, catalog: &PartCatalog, cat: PartCategory, f
             card.spawn(Node { column_gap: Val::Px(8.0), align_items: AlignItems::Baseline, ..default() })
                 .with_children(|row| {
                     row.spawn(txt(&opt.name, &fonts.heading, 15.0, TEXT));
-                    row.spawn((
+                    let mut badge = row.spawn((
                         Node {
                             margin: UiRect::left(Val::Auto),
                             padding: UiRect::axes(Val::Px(6.0), Val::Px(1.0)),
                             ..default()
                         },
                         BackgroundColor(ACCENT),
-                        PartTag(i),
-                    ))
-                    .with_children(|t| {
+                    ));
+                    match axle {
+                        Some(front) => { badge.insert(SuspTag(i, front)); }
+                        None => { badge.insert(PartTag(i)); }
+                    }
+                    badge.with_children(|t| {
                         t.spawn(txt("osazeno", &fonts.body, 11.0, BG));
                     });
                 });
@@ -381,15 +394,17 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                         }
                     });
 
-                    // ── ZAVĚŠENÍ ──
+                    // ── ZAVĚŠENÍ: dvě sekce (přední / zadní), každá karty + slidery té nápravy ──
                     l.spawn((Node { flex_direction: FlexDirection::Column, ..default() }, TabContent(GarageTab::Suspension)))
                         .with_children(|s| {
-                            spawn_cards(s, &catalog, PartCategory::Suspension, &fonts);
-                            s.spawn((txt("LADĚNÍ / TUNE", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
-                            spawn_sliders(s, &fonts, &[
-                                (SliderKind::SuspSpring, "Tuhost pružiny"),
-                                (SliderKind::SuspArm, "Tuhost ramen"),
-                            ]);
+                            for (front, heading) in [(true, "PŘEDNÍ ZAVĚŠENÍ"), (false, "ZADNÍ ZAVĚŠENÍ")] {
+                                s.spawn((txt(heading, &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
+                                spawn_cards(s, &catalog, PartCategory::Suspension, &fonts, Some(front));
+                                spawn_sliders(s, &fonts, &[
+                                    (SliderKind::SuspSpring(front), "Tuhost pružiny"),
+                                    (SliderKind::SuspArm(front), "Tuhost ramen"),
+                                ]);
+                            }
                         });
 
                     // ── POHON: motor + převodovka (katalog) + layout/diff (přepínače) ──
@@ -417,7 +432,7 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                                     }
                                 });
                             d.spawn((txt("PŘEVODOVKA / GEARBOX", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
-                            spawn_cards(d, &catalog, PartCategory::Gearbox, &fonts);
+                            spawn_cards(d, &catalog, PartCategory::Gearbox, &fonts, None);
 
                             d.spawn((txt("ROZVOD / DRIVE LAYOUT", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
                             d.spawn((Node { border: UiRect::all(Val::Px(1.0)), ..default() }, BorderColor(DIVIDER)))
@@ -450,7 +465,7 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                                 });
 
                             d.spawn((txt("CHLAZENÍ / COOLING", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
-                            spawn_cards(d, &catalog, PartCategory::Cooler, &fonts);
+                            spawn_cards(d, &catalog, PartCategory::Cooler, &fonts, None);
                         });
 
                     // ── BRZDY / PNEU ──
@@ -462,7 +477,7 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                                 (SliderKind::BrakePower, "Síla brzd"),
                             ]);
                             s.spawn((txt("PNEU / TIRES", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
-                            spawn_cards(s, &catalog, PartCategory::Tire, &fonts);
+                            spawn_cards(s, &catalog, PartCategory::Tire, &fonts, None);
                         });
                 });
 
@@ -671,6 +686,11 @@ fn garage_clicks(
             }
             GarageAction::Tab(tab) => active.0 = tab,
             GarageAction::Part(i) => catalog.0[i].data.apply(&mut loadout),
+            GarageAction::SuspPart { idx, front } => {
+                if let PartData::Suspension(k) = catalog.0[idx].data {
+                    loadout.set_susp(front, k);
+                }
+            }
             GarageAction::Layout(layout) => loadout.layout = layout,
             GarageAction::DiffLock(locked) => loadout.rear_diff.lock = if locked { 1.0 } else { 0.0 },
             GarageAction::Car(choice) => loadout.car = choice,
@@ -752,11 +772,16 @@ fn sync_selection(
     active: Res<ActiveTab>,
     catalog: Res<PartCatalog>,
     mut nodes: Query<(&GarageAction, Option<&mut BorderColor>, &mut BackgroundColor), With<Button>>,
-    mut tags: Query<(&PartTag, &mut Node)>,
+    mut tags: Query<(&PartTag, &mut Node), Without<SuspTag>>,
+    mut susp_tags: Query<(&SuspTag, &mut Node), Without<PartTag>>,
 ) {
     for (action, border, mut bg) in &mut nodes {
         let (selectable, on) = match *action {
             GarageAction::Part(i) => (true, catalog.0[i].data.is_selected(&loadout)),
+            GarageAction::SuspPart { idx, front } => (
+                true,
+                matches!(&catalog.0[idx].data, PartData::Suspension(k) if loadout.susp(front).same_variant(*k)),
+            ),
             GarageAction::Tab(tab) => (true, tab == active.0),
             GarageAction::Layout(layout) => (true, layout.label() == loadout.layout.label()),
             GarageAction::EngineCfg(cfg) => (true, cfg == loadout.engine_spec.config),
@@ -789,6 +814,10 @@ fn sync_selection(
     }
     for (PartTag(i), mut node) in &mut tags {
         node.display = if catalog.0[*i].data.is_selected(&loadout) { Display::Flex } else { Display::None };
+    }
+    for (SuspTag(i, front), mut node) in &mut susp_tags {
+        let on = matches!(&catalog.0[*i].data, PartData::Suspension(k) if loadout.susp(*front).same_variant(*k));
+        node.display = if on { Display::Flex } else { Display::None };
     }
 }
 
@@ -865,9 +894,15 @@ fn update_specs(
     build_mass.mass = mass;
     build_mass.front = front;
     let diff = if loadout.rear_diff.lock > 0.5 { "zamčený" } else { "otevřený" };
+    // Zavěšení: stejné vpředu/vzadu → jeden label, jinak "předek / zadek".
+    let susp_label = if loadout.front_susp.same_variant(loadout.rear_susp) {
+        loadout.front_susp.label().to_string()
+    } else {
+        format!("{} / {}", loadout.front_susp.label(), loadout.rear_susp.label())
+    };
     let rows: [&str; 7] = [
         &counts[0], &counts[1], &counts[2], &counts[3],
-        loadout.suspension.label(), loadout.layout.label(), diff,
+        &susp_label, loadout.layout.label(), diff,
     ];
     for (SpecValue(i), mut text) in &mut values {
         if text.0 != rows[*i] {

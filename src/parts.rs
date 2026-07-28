@@ -51,7 +51,9 @@ impl PartData {
     // dílů hodně; nová kategorie = 1 arm, nový díl = 0 Rustu (jen JSON).
     pub fn apply(&self, loadout: &mut Loadout) {
         match self {
-            PartData::Suspension(s) => loadout.suspension = *s,
+            // Zavěšení se montuje per náprava přes garáž (GarageAction::SuspPart);
+            // tenhle celoautový fallback dá díl na obě nápravy (LoadBuild ho neužívá).
+            PartData::Suspension(s) => { loadout.front_susp = *s; loadout.rear_susp = *s; }
             PartData::Gearbox(g) => loadout.gearbox = g.clone(),
             PartData::Tire(c) => loadout.compound = *c,
             PartData::Cooler(c) => loadout.cooler = *c,
@@ -62,7 +64,7 @@ impl PartData {
     pub fn is_selected(&self, loadout: &Loadout) -> bool {
         match self {
             // topologie (kind), ne přesná tuhost — tu ladí slidery
-            PartData::Suspension(s) => loadout.suspension.same_variant(*s),
+            PartData::Suspension(s) => loadout.front_susp.same_variant(*s),
             PartData::Gearbox(g) => &loadout.gearbox == g,
             PartData::Tire(c) => &loadout.compound == c,
             PartData::Cooler(c) => &loadout.cooler == c,
