@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 use serde::Deserialize;
 
-use crate::vehicle::{Gearbox, Loadout, SuspensionKind};
+use crate::vehicle::{Compound, Cooler, Gearbox, Loadout, SuspensionKind};
 
 // Jedna položka katalogu = zobrazitelný díl + jeho data.
 #[derive(Deserialize)]
@@ -24,6 +24,8 @@ pub struct PartOption {
 pub enum PartData {
     Suspension(SuspensionKind),
     Gearbox(Gearbox),
+    Tire(Compound),  // pneu kompound (grip/okno/wear vrstva) — {"tire":{…}}
+    Cooler(Cooler),  // chladič motoru (h0/h1) — {"cooler":{…}}
 }
 
 // Kategorie = tab v garáži. Pořadí = pořadí tabů.
@@ -31,6 +33,8 @@ pub enum PartData {
 pub enum PartCategory {
     Suspension,
     Gearbox,
+    Tire,
+    Cooler,
 }
 
 impl PartData {
@@ -38,6 +42,8 @@ impl PartData {
         match self {
             PartData::Suspension(_) => PartCategory::Suspension,
             PartData::Gearbox(_) => PartCategory::Gearbox,
+            PartData::Tire(_) => PartCategory::Tire,
+            PartData::Cooler(_) => PartCategory::Cooler,
         }
     }
 
@@ -47,6 +53,8 @@ impl PartData {
         match self {
             PartData::Suspension(s) => loadout.suspension = *s,
             PartData::Gearbox(g) => loadout.gearbox = g.clone(),
+            PartData::Tire(c) => loadout.compound = *c,
+            PartData::Cooler(c) => loadout.cooler = *c,
         }
     }
 
@@ -56,6 +64,8 @@ impl PartData {
             // topologie (kind), ne přesná tuhost — tu ladí slidery
             PartData::Suspension(s) => loadout.suspension.same_variant(*s),
             PartData::Gearbox(g) => &loadout.gearbox == g,
+            PartData::Tire(c) => &loadout.compound == c,
+            PartData::Cooler(c) => &loadout.cooler == c,
         }
     }
 }
@@ -95,15 +105,20 @@ mod tests {
         let json = r#"[
             {"name":"S","note":"","data":{"suspension":{"coil":{"arm_k":150000,"coil_k":100000}}}},
             {"name":"R","note":"","data":{"suspension":"rigid"}},
-            {"name":"G","note":"","data":{"gearbox":{"ratios":[3.5,2.1],"final_drive":3.9}}}
+            {"name":"G","note":"","data":{"gearbox":{"ratios":[3.5,2.1],"final_drive":3.9}}},
+            {"name":"T","note":"","data":{"tire":{"grip":1.05,"win_lo":70,"win_hi":100,"wear_rate":3.0e-7,"pressure":2.0}}},
+            {"name":"C","note":"","data":{"cooler":{"h0":85,"h1":35}}}
         ]"#;
         let v: Vec<PartOption> = serde_json::from_str(json).unwrap();
-        assert_eq!(v.len(), 3);
+        assert_eq!(v.len(), 5);
         let cats: Vec<_> = v.iter().map(|p| p.data.category()).collect();
         assert_eq!(cats, vec![
             PartCategory::Suspension, PartCategory::Suspension, PartCategory::Gearbox,
+            PartCategory::Tire, PartCategory::Cooler,
         ]);
         assert!(matches!(v[0].data, PartData::Suspension(SuspensionKind::Coil { .. })));
         assert!(matches!(v[1].data, PartData::Suspension(SuspensionKind::Rigid)));
+        assert!(matches!(v[3].data, PartData::Tire(_)));
+        assert!(matches!(v[4].data, PartData::Cooler(_)));
     }
 }

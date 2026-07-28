@@ -1,0 +1,8 @@
+[
+  { "name": "STOCK", "note": "sériový chladič — základní odvod (default)",
+    "data": { "cooler": { "h0": 67, "h1": 25 } } },
+  { "name": "SPORT", "note": "větší jádro — snese delší zátěž",
+    "data": { "cooler": { "h0": 85, "h1": 35 } } },
+  { "name": "RACE", "note": "závodní chladič — drží nízkou teplotu i naplno",
+    "data": { "cooler": { "h0": 110, "h1": 50 } } }
+]

@@ -139,12 +139,21 @@ enum TempKind {
     Brake,
     Tire,
     Wear,
+    Pressure,
     Engine,
 }
 #[derive(Component)]
 struct TempFill(TempKind, usize); // (druh, index kola; Engine kolo ignoruje)
 #[derive(Component)]
 struct TempLabel(TempKind, usize); // číslo pod barem
+// Aktivní roh car-ikony řádku (Fáze 3) — obarvuje se gradientem dle teploty pneu daného kola.
+#[derive(Component)]
+struct IconDot(usize);
+// Palivový bar (Fáze 2b→3): fill (šířka % nádrže) + text (L + %). Krmí FuelState.
+#[derive(Component)]
+struct FuelFill;
+#[derive(Component)]
+struct FuelLabel;
 
 // Gradient barva dle podílu: modrá (studená 0.0) → zelená (optimum 0.55) → červená (horká 1.0).
 // Stejná paleta jako blueprint redesign (accent-blue / green / red).
@@ -166,19 +175,24 @@ fn temp_frac(kind: TempKind, v: f32) -> f32 {
         TempKind::Brake => (80.0, 650.0),
         TempKind::Tire => (40.0, 115.0),
         TempKind::Wear => (0.0, 100.0),
+        TempKind::Pressure => (1.8, 2.8), // bar — modrá podhuštěná, zelená ideál, červená přehuštěná
         TempKind::Engine => (60.0, 115.0),
     };
     ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
 }
 
 // Hodnota (pro frac) + text (pro label) daného druhu/kola.
-fn temp_read(sb: &SoftBody, engine_c: f32, kind: TempKind, wheel: usize) -> (f32, String) {
+fn temp_read(sb: &SoftBody, engine_c: f32, loadout: &Loadout, ambient: f32, kind: TempKind, wheel: usize) -> (f32, String) {
     match kind {
         TempKind::Engine => (engine_c, format!("{engine_c:.0}°C")),
         _ => match sb.wheels.get(wheel) {
             Some(w) => match kind {
                 TempKind::Brake => (w.thermal.brake_c, format!("{:.0}°C", w.thermal.brake_c)),
                 TempKind::Tire => (w.thermal.tire_surf_c, format!("{:.0}°C", w.thermal.tire_surf_c)),
+                TempKind::Pressure => {
+                    let p = crate::thermal::tire_pressure(w.thermal.tire_core_c, loadout.compound.pressure, ambient);
+                    (p, format!("{p:.1}"))
+                }
                 _ => {
                     let pct = w.thermal.wear * 100.0;
                     (pct, if w.thermal.burst { "PRASK".into() } else { format!("{pct:.0}%") })
@@ -714,7 +728,44 @@ fn update_dash(
 // popisky, 4 řádky kol (label + 3 bary brzda/pneu/opot, každý s číslem pod barem) + motor
 // (coolant) dole. Bar = kontejner + fill child (šířka % + gradient barva). Plní update_temps.
 fn spawn_temps(mut commands: Commands, fonts: Res<UiFonts>) {
-    let wheels = ["FL", "FR", "RL", "RR"];
+    // Car-ikona řádku (Fáze 3): top-down auto z bevy_ui nodů (bevy_ui nemá SVG). 2×2 rohy =
+    // kola FL/FR/RL/RR; roh tohoto řádku (active) svítí gradientem dle teploty pneu, ostatní
+    // ztlumené → řádek říká „které kolo" polohou i barvou místo textu FL/FR/RL/RR.
+    let car_icon = |r: &mut ChildBuilder, active: usize| {
+        r.spawn(Node { width: Val::Px(34.0), justify_content: JustifyContent::Center, ..default() })
+            .with_children(|c| {
+                c.spawn((
+                    Node {
+                        width: Val::Px(18.0),
+                        height: Val::Px(24.0),
+                        flex_direction: FlexDirection::Column,
+                        justify_content: JustifyContent::SpaceBetween,
+                        padding: UiRect::all(Val::Px(3.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BorderColor(DIVIDER),
+                    BackgroundColor(LCD_BG),
+                    BorderRadius::all(Val::Px(3.0)),
+                ))
+                .with_children(|body| {
+                    for row in 0..2 {
+                        body.spawn(Node { justify_content: JustifyContent::SpaceBetween, ..default() })
+                            .with_children(|rw| {
+                                for col in 0..2 {
+                                    let j = row * 2 + col;
+                                    let dot = Node { width: Val::Px(5.0), height: Val::Px(5.0), ..default() };
+                                    if j == active {
+                                        rw.spawn((dot, BackgroundColor(grad_color(0.0)), BorderRadius::MAX, IconDot(active)));
+                                    } else {
+                                        rw.spawn((dot, BackgroundColor(Color::srgba(0.6, 0.6, 0.6, 0.25)), BorderRadius::MAX));
+                                    }
+                                }
+                            });
+                    }
+                });
+            });
+    };
     // jedna buňka baru: sloupec [bar][číslo pod ním], zabírá stejný podíl šířky
     let bar_cell = |r: &mut ChildBuilder, fonts: &UiFonts, kind: TempKind, wheel: usize, align: JustifyContent| {
         r.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(2.0), ..default() })
@@ -756,7 +807,7 @@ fn spawn_temps(mut commands: Commands, fonts: Res<UiFonts>) {
             p.spawn(Node { column_gap: Val::Px(10.0), margin: UiRect::bottom(Val::Px(6.0)), ..default() })
                 .with_children(|hr| {
                     hr.spawn((Node { width: Val::Px(34.0), ..default() },));
-                    for lbl in ["BRZDA", "PNEU", "OPOT."] {
+                    for lbl in ["BRZDA", "PNEU", "OPOT.", "TLAK"] {
                         hr.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), justify_content: JustifyContent::Center, ..default() })
                             .with_children(|c| {
                                 c.spawn(txt(lbl, &fonts.body, 9.0, TEXT_MUTED));
@@ -767,12 +818,11 @@ fn spawn_temps(mut commands: Commands, fonts: Res<UiFonts>) {
             for w in 0..4 {
                 p.spawn(Node { column_gap: Val::Px(10.0), align_items: AlignItems::Center, margin: UiRect::bottom(Val::Px(8.0)), ..default() })
                     .with_children(|r| {
-                        r.spawn((Node { width: Val::Px(34.0), ..default() },)).with_children(|c| {
-                            c.spawn(txt(wheels[w], &fonts.mono, 11.0, TEXT));
-                        });
+                        car_icon(r, w);
                         bar_cell(r, &fonts, TempKind::Brake, w, JustifyContent::Center);
                         bar_cell(r, &fonts, TempKind::Tire, w, JustifyContent::Center);
                         bar_cell(r, &fonts, TempKind::Wear, w, JustifyContent::Center);
+                        bar_cell(r, &fonts, TempKind::Pressure, w, JustifyContent::Center);
                     });
             }
             // motor / coolant (oddělovač nahoře)
@@ -786,6 +836,23 @@ fn spawn_temps(mut commands: Commands, fonts: Res<UiFonts>) {
                 });
                 bar_cell(r, &fonts, TempKind::Engine, 0, JustifyContent::FlexEnd);
             });
+            // PALIVO: bar (šířka = % nádrže, barva varuje při docházení) + text (L + %). Fáze 2b.
+            p.spawn(Node { column_gap: Val::Px(10.0), align_items: AlignItems::Center, margin: UiRect::top(Val::Px(6.0)), ..default() })
+                .with_children(|r| {
+                    r.spawn((Node { width: Val::Px(34.0), ..default() },)).with_children(|c| {
+                        c.spawn(txt("PAL", &fonts.mono, 11.0, TEXT));
+                    });
+                    r.spawn(Node { flex_grow: 1.0, flex_direction: FlexDirection::Column, row_gap: Val::Px(2.0), ..default() })
+                        .with_children(|col| {
+                            col.spawn((Node { height: Val::Px(9.0), border: UiRect::all(Val::Px(1.0)), ..default() }, BackgroundColor(LCD_BG), BorderColor(DIVIDER)))
+                                .with_children(|b| {
+                                    b.spawn((Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() }, BackgroundColor(grad_color(0.4)), FuelFill));
+                                });
+                            col.spawn(Node { justify_content: JustifyContent::FlexEnd, ..default() }).with_children(|t| {
+                                t.spawn((txt("—", &fonts.mono, 10.0, TEXT_MUTED), FuelLabel));
+                            });
+                        });
+                });
         });
 }
 
@@ -802,11 +869,17 @@ fn toggle_temps_panel(keys: Res<ButtonInput<KeyCode>>, mut panel: Query<&mut Nod
 fn update_temps(
     sb: Res<SoftBody>,
     state: Res<DrivetrainState>,
-    mut fills: Query<(&TempFill, &mut Node, &mut BackgroundColor)>,
-    mut labels: Query<(&TempLabel, &mut Text)>,
+    loadout: Res<Loadout>,
+    ambient: Res<crate::thermal::Ambient>,
+    fuel: Res<crate::vehicle::FuelState>,
+    mut fills: Query<(&TempFill, &mut Node, &mut BackgroundColor), (Without<IconDot>, Without<FuelFill>)>,
+    mut dots: Query<(&IconDot, &mut BackgroundColor), (Without<TempFill>, Without<FuelFill>)>,
+    mut labels: Query<(&TempLabel, &mut Text), Without<FuelLabel>>,
+    mut fuel_fill: Query<(&mut Node, &mut BackgroundColor), (With<FuelFill>, Without<TempFill>, Without<IconDot>)>,
+    mut fuel_label: Query<&mut Text, (With<FuelLabel>, Without<TempLabel>)>,
 ) {
     for (TempFill(kind, wheel), mut node, mut bg) in &mut fills {
-        let (v, _) = temp_read(&sb, state.engine_c, *kind, *wheel);
+        let (v, _) = temp_read(&sb, state.engine_c, &loadout, ambient.0, *kind, *wheel);
         let f = temp_frac(*kind, v);
         let pct = Val::Percent((f * 100.0).max(4.0)); // min 4 % ať je i studený bar vidět
         if node.width != pct {
@@ -818,7 +891,36 @@ fn update_temps(
         }
     }
     for (TempLabel(kind, wheel), mut text) in &mut labels {
-        let (_, s) = temp_read(&sb, state.engine_c, *kind, *wheel);
+        let (_, s) = temp_read(&sb, state.engine_c, &loadout, ambient.0, *kind, *wheel);
+        if text.0 != s {
+            text.0 = s;
+        }
+    }
+    // Car-ikona (Fáze 3): aktivní roh obarvi gradientem dle teploty pneu daného kola.
+    for (IconDot(wheel), mut bg) in &mut dots {
+        let f = match sb.wheels.get(*wheel) {
+            Some(w) => temp_frac(TempKind::Tire, w.thermal.tire_surf_c),
+            None => 0.0,
+        };
+        let color = grad_color(f);
+        if bg.0 != color {
+            *bg = BackgroundColor(color);
+        }
+    }
+    // Palivo (Fáze 2b): bar = % nádrže, žlutá/zelená plná → červená při docházení.
+    let frac = if fuel.capacity_kg > 0.0 { (fuel.kg / fuel.capacity_kg).clamp(0.0, 1.0) } else { 0.0 };
+    let fuel_color = if frac < 0.15 { grad_color(1.0) } else { grad_color(0.35) };
+    for (mut node, mut bg) in &mut fuel_fill {
+        let pct = Val::Percent((frac * 100.0).max(2.0));
+        if node.width != pct {
+            node.width = pct;
+        }
+        if bg.0 != fuel_color {
+            *bg = BackgroundColor(fuel_color);
+        }
+    }
+    for mut text in &mut fuel_label {
+        let s = format!("{:.1} L  ({:.0} %)", fuel.liters(), frac * 100.0);
         if text.0 != s {
             text.0 = s;
         }

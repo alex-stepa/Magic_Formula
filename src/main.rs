@@ -45,6 +45,7 @@ fn main() {
         .init_resource::<DrivetrainState>()
         .init_resource::<thermal::Ambient>()
         .init_resource::<DriverAids>()
+        .init_resource::<FuelState>()
         .init_resource::<TestDrive>()
         .init_resource::<ChassisParams>()
         .insert_resource(parts::load_part_catalog())
@@ -56,6 +57,9 @@ fn main() {
         .add_plugins(audio::EngineSoundPlugin)
         .add_plugins(effects::TireFxPlugin)
         .add_systems(Startup, setup)
+        // Plná nádrž při každém vjezdu do hry (garáž → jízda). ponytail: respawn klávesou 1
+        // uprostřed jízdy nádrž neresetuje — okrajové, netřeba.
+        .add_systems(OnEnter(ui::AppState::Game), |mut fuel: ResMut<FuelState>| fuel.kg = fuel.capacity_kg)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
         // Běží jen ve hře a mimo pauzu — na title/garáži/pauze svět stojí.
         .add_systems(FixedUpdate, softbody_solve.run_if(ui::in_game_unpaused))

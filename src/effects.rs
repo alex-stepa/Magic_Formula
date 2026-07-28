@@ -54,13 +54,17 @@ struct Smoke {
 }
 
 const MARK_CAP: usize = 500;
-const MARK_SPACING: f32 = 0.15; // m mezi stopami
+const MARK_SPACING: f32 = 0.10; // m mezi stopami (hustší = výraznější souvislá stopa)
 const SKID_MARK: f32 = 1.35; // combined slip (κ/α onset) nad kterým kreslíme stopu
+// Kouř: PŘÍSNÝ — jen výrazně přehřátá pneu (nad TIRE_HOT) při silném skluzu. Vzácný, ale
+// dramatický. ponytail: hodnoty blind-tuned (headless nerozjedu), doladí autor po cargo run.
+const SMOKE_TEMP: f32 = 165.0; // °C práh kouře (TIRE_HOT je 140 — tohle je „hodně za")
+const SMOKE_SLIP: f32 = 1.6; // combined slip práh kouře
 
 fn setup_fx(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>) {
     let mark_mesh = meshes.add(Cuboid::new(0.22, 0.02, 0.4)); // plochý slab na zem
     let mark_mat = mats.add(StandardMaterial {
-        base_color: Color::srgba(0.04, 0.04, 0.05, 0.7),
+        base_color: Color::srgba(0.03, 0.03, 0.04, 0.88), // tmavší + míň průhledné = výraznější
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         ..default()
@@ -124,8 +128,8 @@ fn smoke_spawn(
     }
     *acc = 0.0;
     for w in sb.wheels.iter() {
-        // Kouř jen z PŘEHŘÁTÉ pneu, která zároveň klouže (burnout/drift za horka).
-        if w.telem.fz <= 0.0 || w.thermal.tire_surf_c < crate::thermal::TIRE_HOT || wheel_slip(&w.telem) < 1.2 {
+        // Kouř jen z HODNĚ přehřáté pneu, která zároveň silně klouže (extrémní burnout/drift).
+        if w.telem.fz <= 0.0 || w.thermal.tire_surf_c < SMOKE_TEMP || wheel_slip(&w.telem) < SMOKE_SLIP {
             continue;
         }
         let p = sb.pos[w.hub];
@@ -139,8 +143,8 @@ fn smoke_spawn(
         commands.spawn((
             Mesh3d(fx.smoke_mesh.clone()),
             MeshMaterial3d(mat),
-            Transform::from_translation(pos).with_scale(Vec3::splat(0.4)),
-            Smoke { age: 0.0, life: 1.3, rise: 1.6 },
+            Transform::from_translation(pos).with_scale(Vec3::splat(0.5)),
+            Smoke { age: 0.0, life: 2.0, rise: 1.4 }, // větší + déle žije (vzácný = ať je vidět)
             StateScoped(AppState::Game),
         ));
     }
@@ -161,9 +165,9 @@ fn smoke_update(
         }
         let f = s.age / s.life; // 0..1
         tr.translation.y += s.rise * dt; // stoupá
-        tr.scale = Vec3::splat(0.4 + f * 1.0); // roste
+        tr.scale = Vec3::splat(0.5 + f * 1.8); // roste do velkého oblaku
         if let Some(m) = mats.get_mut(&math.0) {
-            m.base_color = m.base_color.with_alpha(0.5 * (1.0 - f)); // slábne
+            m.base_color = m.base_color.with_alpha(0.55 * (1.0 - f)); // slábne
         }
     }
 }

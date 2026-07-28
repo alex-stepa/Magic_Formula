@@ -1,0 +1,8 @@
+[
+  { "name": "MEDIUM", "note": "vyvážená — provozní okno i grip jako default (neutrální)",
+    "data": { "tire": { "grip": 1.0, "win_lo": 75, "win_hi": 105, "wear_rate": 2.0e-7, "pressure": 2.0 } } },
+  { "name": "SOFT", "note": "měkká — víc gripu, úzké okno níž, citlivá na tlak, rychle sjetá",
+    "data": { "tire": { "grip": 1.05, "win_lo": 70, "win_hi": 100, "wear_rate": 3.0e-7, "pressure": 1.9, "press_sens": 0.15 } } },
+  { "name": "HARD", "note": "tvrdá — míň gripu, okno výš, snese tlak, drží dlouho",
+    "data": { "tire": { "grip": 0.97, "win_lo": 80, "win_hi": 115, "wear_rate": 1.2e-7, "pressure": 2.2, "press_sens": 0.06 } } }
+]

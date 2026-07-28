@@ -35,7 +35,7 @@ impl GarageTab {
         match self {
             GarageTab::Suspension => "ZAVĚŠENÍ",
             GarageTab::Drivetrain => "POHON",
-            GarageTab::Brakes => "BRZDY",
+            GarageTab::Brakes => "BRZDY / PNEU",
         }
     }
 }
@@ -448,9 +448,12 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                                         });
                                     }
                                 });
+
+                            d.spawn((txt("CHLAZENÍ / COOLING", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
+                            spawn_cards(d, &catalog, PartCategory::Cooler, &fonts);
                         });
 
-                    // ── BRZDY ──
+                    // ── BRZDY / PNEU ──
                     l.spawn((Node { flex_direction: FlexDirection::Column, ..default() }, TabContent(GarageTab::Brakes)))
                         .with_children(|s| {
                             s.spawn((txt("BRZDY / BRAKES", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::bottom(Val::Px(8.0)), ..default() }));
@@ -458,6 +461,8 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                                 (SliderKind::BrakeBias, "Rozložení (př/z)"),
                                 (SliderKind::BrakePower, "Síla brzd"),
                             ]);
+                            s.spawn((txt("PNEU / TIRES", &fonts.heading, 13.0, ACCENT_300), Node { margin: UiRect::vertical(Val::Px(8.0)), ..default() }));
+                            spawn_cards(s, &catalog, PartCategory::Tire, &fonts);
                         });
                 });
 

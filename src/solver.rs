@@ -21,6 +21,8 @@ pub struct SoftBody {
     pub entities: Vec<Entity>, // node index i ↔ render entita (zápis Transformu)
     pub substeps: u32,         // kolik integračních kroků na snímek (adaptivně dle nejtužšího beamu)
     pub chassis: Option<ChassisFrame>, // referenční nody pro směr auta (None u .veh — nemá kola)
+    pub fuel_nodes: Vec<usize>,     // nody nádrže — palivo jim přidává hmotu (grip/accel)
+    pub fuel_base_mass: Vec<f32>,   // hmota fuel nodu bez paliva (paralelní k fuel_nodes; .veh má různé)
 }
 
 // Referenční nody těla, ze kterých solver dopočítá dopředný/boční směr auta (yaw rámu).
@@ -377,7 +379,7 @@ pub fn magic_formula(x: f32, p: Pacejka, d: f32) -> f32 {
 // --- SOLVER: semi-implicitní Euler se substeppingem (běží ve FixedUpdate, 64 Hz) ---
 // Jeden snímek rozdělíme na `sb.substeps` malých kroků (adaptivně, viz compute_substeps),
 // aby tuhé beamy zůstaly stabilní (CFL: dt < 2/ω). Reálné tuhosti, žádné škálování.
-pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Time<Fixed>>, terrain: Res<Terrain>, colliders: Res<WorldColliders>, mut crash_ev: EventWriter<CrashImpact>) {
+pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, ambient: Res<crate::thermal::Ambient>, time: Res<Time<Fixed>>, terrain: Res<Terrain>, colliders: Res<WorldColliders>, mut crash_ev: EventWriter<CrashImpact>) {
     if sb.beams.is_empty() {
         return; // nic nespawnuto
     }
@@ -440,12 +442,17 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Tim
             let nd = sb.wheels[wi].tire.normal_damping;
             let long = sb.wheels[wi].tire.long;
             let lat = sb.wheels[wi].tire.lat;
-            // Grip vrstva: teplotní multiplikátor peaku (VRSTVA nad Pacejkou). Násobí
-            // `friction`, které dál krmí špičku křivky (d) I strop kruhu adheze (fmax) →
-            // konzistentní. V provozním okně ×1.00 = původní ladění beze změny.
+            // Grip vrstvy (VRSTVA nad Pacejkou): teplotní multiplikátor peaku (okno z dílu
+            // Compound) × kompound grip × tlak (z teploty jádra) × opotřebení. Násobí `friction`,
+            // které dál krmí špičku křivky (d) I strop kruhu adheze (fmax) → konzistentní.
+            // Default díl (grip ×1.00, okno WIN_LO/HI, press_sens 0) = původní ladění beze změny.
+            let comp = loadout.compound;
+            let core_c = sb.wheels[wi].thermal.tire_core_c;
             let friction =
                 sb.wheels[wi].tire.friction
-                    * crate::thermal::grip_mult(sb.wheels[wi].thermal.tire_surf_c)
+                    * crate::thermal::grip_mult(sb.wheels[wi].thermal.tire_surf_c, comp.win_lo, comp.win_hi)
+                    * comp.grip
+                    * crate::thermal::pressure_grip(core_c, comp.pressure, ambient.0, comp.win_lo, comp.win_hi, comp.press_sens)
                     * if sb.wheels[wi].thermal.burst {
                         crate::thermal::BURST_GRIP
                     } else {

@@ -15,7 +15,7 @@
 
 use bevy::prelude::*;
 use crate::solver::{SoftBody, WheelTelem};
-use crate::vehicle::DrivetrainState;
+use crate::vehicle::{DrivetrainState, Loadout};
 
 /// Výchozí teplota okolí (°C). Spawn teploty + cíl chlazení. Runtime přepisuje Ambient.
 pub const T_AMBIENT: f32 = 30.0;
@@ -36,8 +36,8 @@ impl Default for Ambient {
 pub const ENGINE_C_CAP: f32 = 8000.0; // tepelná kapacita bloku+chladiče (J/°C)
 pub const ENGINE_HEAT: f32 = 55000.0; // W při plné zátěži (rpm_frac × throttle)
 pub const ENGINE_IDLE_HEAT: f32 = 4000.0; // W baseline běžícího motoru
-pub const ENGINE_H0: f32 = 67.0; // pasivní odvod (W/°C) — laděno na idle ~90 °C
-pub const ENGINE_H1: f32 = 25.0; // radiátor: konvekce ∝ rychlost (W/°C na m/s)
+pub const ENGINE_H0: f32 = 67.0; // pasivní odvod (W/°C) — laděno na idle ~90 °C; default Cooler.h0
+pub const ENGINE_H1: f32 = 25.0; // radiátor: konvekce ∝ rychlost (W/°C na m/s); default Cooler.h1
 pub const ENGINE_OVERHEAT: f32 = 115.0; // °C — nad tím klesá výkon
 pub const ENGINE_COOK: f32 = 135.0; // °C — plná ztráta
 pub const ENGINE_POWER_FLOOR: f32 = 0.6; // zbytkový výkon při přehřátí
@@ -49,10 +49,11 @@ pub fn engine_power_factor(engine_c: f32) -> f32 {
 }
 
 /// Krok teploty motoru (čistá funkce). `load` = rpm_frac × throttle (0..1); chcíplý motor
-/// = running false (nedělá teplo, jen chladne). `v` = m/s. Vrací novou teplotu (clamp).
-pub fn engine_step(engine_c: f32, running: bool, load: f32, v: f32, ambient: f32, dt: f32) -> f32 {
+/// = running false (nedělá teplo, jen chladne). `v` = m/s. `h0`/`h1` = chlazení z dílu Cooler
+/// (default ENGINE_H0/H1). Vrací novou teplotu (clamp).
+pub fn engine_step(engine_c: f32, running: bool, load: f32, v: f32, ambient: f32, dt: f32, h0: f32, h1: f32) -> f32 {
     let heat = if running { ENGINE_IDLE_HEAT + ENGINE_HEAT * load.clamp(0.0, 1.0) } else { 0.0 };
-    let cool = (ENGINE_H0 + ENGINE_H1 * v.abs()) * (engine_c - ambient);
+    let cool = (h0 + h1 * v.abs()) * (engine_c - ambient);
     (engine_c + (heat - cool) / ENGINE_C_CAP * dt).clamp(ambient, 160.0)
 }
 
@@ -72,10 +73,11 @@ pub const FADE_START: f32 = 450.0; // °C — začátek slábnutí
 pub const FADE_FULL: f32 = 700.0; // °C — plný fade
 pub const FADE_FLOOR: f32 = 0.4; // zbytkový podíl momentu při plném fade
 
-/// Efektivní podíl brzdného momentu podle teploty: 1.0 pod FADE_START, lineárně na
-/// FADE_FLOOR nad FADE_FULL. Násobí se na wheel.brake ve vehicle_drive.
-pub fn brake_fade(brake_c: f32) -> f32 {
-    let t = ((brake_c - FADE_START) / (FADE_FULL - FADE_START)).clamp(0.0, 1.0);
+/// Efektivní podíl brzdného momentu podle teploty: 1.0 pod `fade_start`, lineárně na
+/// FADE_FLOOR nad FADE_FULL. `fade_start` = práh z dílu Brakes (default FADE_START).
+/// Násobí se na wheel.brake ve vehicle_drive.
+pub fn brake_fade(brake_c: f32, fade_start: f32) -> f32 {
+    let t = ((brake_c - fade_start) / (FADE_FULL - fade_start)).clamp(0.0, 1.0);
     1.0 - t * (1.0 - FADE_FLOOR)
 }
 
@@ -98,6 +100,28 @@ pub const TIRE_HOT: f32 = 140.0; // ≥ = přehřátá (podlaha GRIP_HOT)
 pub const GRIP_COLD: f32 = 0.90; // multiplikátor peaku studená
 pub const GRIP_HOT: f32 = 0.88; // multiplikátor peaku přehřátá
 
+// --- TLAK PNEU ---
+// Horká pneu = vyšší tlak (plyn se ohřeje). Lineární aproximace: tlak roste s teplotou
+// JÁDRA (pomalá masa vzduchu, ne povrch). COEF ~ 0.004/°C ≈ +0.1 bar na 25 °C nad ambient.
+// ponytail: kalibrační knob — reálná pneu drift dle plynu/objemu, tady jeden lineární člen.
+pub const PRESS_TEMP_COEF: f32 = 0.004; // podíl base tlaku na °C nad ambient
+pub const PRESS_GRIP_FLOOR: f32 = 0.85; // strop ztráty gripu z odchylky tlaku
+
+/// Provozní tlak pneu (bar) z teploty jádra. `base` = studený tlak z dílu Compound.
+/// Nad ambient roste (teplo → tlak). VRSTVA — sama o sobě grip nemění (viz pressure_grip).
+pub fn tire_pressure(core_c: f32, base: f32, ambient: f32) -> f32 {
+    base * (1.0 + PRESS_TEMP_COEF * (core_c - ambient).max(0.0))
+}
+
+/// Grip multiplikátor z tlaku — VRSTVA nad Pacejkou. Peak ×1.00 v cílovém tlaku (ten, který
+/// pneu má ve STŘEDU provozního okna); odchylka (přehuštěná horká / podhuštěná studená) grip
+/// snižuje úměrně `sens`. `sens = 0` (default kompound) → ×1.00 VŽDY = neutrální (grip zaparkovaný).
+pub fn pressure_grip(core_c: f32, base: f32, ambient: f32, win_lo: f32, win_hi: f32, sens: f32) -> f32 {
+    let p = tire_pressure(core_c, base, ambient);
+    let p_target = tire_pressure(0.5 * (win_lo + win_hi), base, ambient); // ideál = tlak v okně
+    (1.0 - sens * (p - p_target).abs()).clamp(PRESS_GRIP_FLOOR, 1.0)
+}
+
 // --- OPOTŘEBENÍ PNEU ---
 pub const WEAR_RATE: f32 = 2.0e-7; // wear za J skluzové práce (kalibrační; burnout ~min = prask)
 pub const WEAR_GRIP_FLOOR: f32 = 0.7; // grip ojeté (wear=1) vs nové (1.0)
@@ -108,14 +132,16 @@ pub const BURST_GRIP: f32 = 0.3; // grip prasklé pneu (flat)
 /// Čte se teplota POVRCHU. Plató ×1.00 v okně [WIN_LO, WIN_HI] (žádná změna gripu).
 /// Studená (≤ TIRE_COLD) = GRIP_COLD, přehřátá (≥ TIRE_HOT) = GRIP_HOT, mezi lineárně.
 /// Násobí `friction` v solveru (jedna hodnota krmí peak i kruh adheze → konzistentní).
-pub fn grip_mult(surf_c: f32) -> f32 {
-    if surf_c < WIN_LO {
-        // studená rampa: TIRE_COLD→WIN_LO ~ GRIP_COLD→1.0
-        let t = ((surf_c - TIRE_COLD) / (WIN_LO - TIRE_COLD)).clamp(0.0, 1.0);
+/// `win_lo`/`win_hi` = provozní okno z dílu Compound (default WIN_LO/WIN_HI). Uvnitř okna
+/// plató ×1.00; rampy k TIRE_COLD/HOT (fyzika gumy, nezávislá na kompoundu).
+pub fn grip_mult(surf_c: f32, win_lo: f32, win_hi: f32) -> f32 {
+    if surf_c < win_lo {
+        // studená rampa: TIRE_COLD→win_lo ~ GRIP_COLD→1.0
+        let t = ((surf_c - TIRE_COLD) / (win_lo - TIRE_COLD)).clamp(0.0, 1.0);
         GRIP_COLD + t * (1.0 - GRIP_COLD)
-    } else if surf_c > WIN_HI {
-        // horká rampa: WIN_HI→TIRE_HOT ~ 1.0→GRIP_HOT
-        let t = ((surf_c - WIN_HI) / (TIRE_HOT - WIN_HI)).clamp(0.0, 1.0);
+    } else if surf_c > win_hi {
+        // horká rampa: win_hi→TIRE_HOT ~ 1.0→GRIP_HOT
+        let t = ((surf_c - win_hi) / (TIRE_HOT - win_hi)).clamp(0.0, 1.0);
         1.0 - t * (1.0 - GRIP_HOT)
     } else {
         1.0 // provozní okno — neutrální
@@ -146,7 +172,7 @@ pub fn wear_grip(wear: f32) -> f32 {
 /// `dt` = délka snímku (s).
 pub fn integrate(
     th: &mut crate::solver::WheelThermal,
-    front: bool,
+    brake_cap: f32,
     brake_nm: f32,
     spin_vel: f32,
     radius: f32,
@@ -154,9 +180,11 @@ pub fn integrate(
     v: f32,
     ambient: f32,
     dt: f32,
+    win_hi: f32,
+    wear_rate: f32,
 ) {
     // BRZDA (jednovrstvá): ohřev z brzdné práce, chlazení konvekcí + pasivně.
-    let brake_cap = if front { BRAKE_C_FRONT } else { BRAKE_C_REAR };
+    // `brake_cap` = tepelná kapacita kotouče z dílu Brakes (default BRAKE_C_FRONT/REAR).
     let bheat = brake_nm * spin_vel.abs();
     let bcool = (BRAKE_H0 + BRAKE_H1 * v.abs()) * (th.brake_c - ambient);
     th.brake_c = (th.brake_c + (bheat - bcool) / brake_cap * dt).max(ambient);
@@ -177,8 +205,8 @@ pub fn integrate(
     // OPOTŘEBENÍ: skluzová (třecí) práce obrušuje gumu; přehřátá pneu se dře rychleji.
     // Nad BURST_WEAR pneu praskne (burst) — grip spadne (řeší solver + wheel_thermal zvuk).
     let slip_work = (tm.f_long.abs() * slip_long + tm.f_lat.abs() * slip_lat) * dt; // J
-    let heat_accel = 1.0 + (th.tire_surf_c - WIN_HI).max(0.0) / 40.0;
-    th.wear = (th.wear + slip_work * WEAR_RATE * heat_accel).min(1.2);
+    let heat_accel = 1.0 + (th.tire_surf_c - win_hi).max(0.0) / 40.0;
+    th.wear = (th.wear + slip_work * wear_rate * heat_accel).min(1.2);
     if th.wear >= BURST_WEAR {
         th.burst = true;
     }
@@ -190,6 +218,7 @@ pub fn integrate(
 pub fn wheel_thermal(
     mut sb: ResMut<SoftBody>,
     state: Res<DrivetrainState>,
+    loadout: Res<Loadout>,
     ambient: Res<Ambient>,
     time: Res<Time>,
     mut burst_ev: EventWriter<crate::solver::CrashImpact>,
@@ -199,9 +228,24 @@ pub fn wheel_thermal(
         return;
     }
     let v = state.speed_kmh / 3.6; // podélná rychlost auta (m/s, se znaménkem)
+    let compound = loadout.compound; // pneu díl (okno + wear rate) — společný všem kolům
     for wheel in &mut sb.wheels {
         let was_burst = wheel.thermal.burst;
-        integrate(&mut wheel.thermal, wheel.front, wheel.brake, wheel.spin_vel, wheel.radius, wheel.telem, v, ambient.0, dt);
+        // kapacita kotouče z dílu Brakes dle nápravy
+        let brake_cap = if wheel.front { loadout.brakes.c_front } else { loadout.brakes.c_rear };
+        integrate(
+            &mut wheel.thermal,
+            brake_cap,
+            wheel.brake,
+            wheel.spin_vel,
+            wheel.radius,
+            wheel.telem,
+            v,
+            ambient.0,
+            dt,
+            compound.win_hi,
+            compound.wear_rate,
+        );
         if !was_burst && wheel.thermal.burst {
             // prasknutí = rána; recykluju crash zvuk z PR #8 (bang) místo nového voice
             burst_ev.send(crate::solver::CrashImpact(4.0));
@@ -217,31 +261,36 @@ mod tests {
     fn brake_fade_curve() {
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
         // pod prahem = plný moment
-        assert_eq!(brake_fade(300.0), 1.0);
-        assert_eq!(brake_fade(FADE_START), 1.0);
+        assert_eq!(brake_fade(300.0, FADE_START), 1.0);
+        assert_eq!(brake_fade(FADE_START, FADE_START), 1.0);
         // v pásmu = slábne, ale ne pod podlahu
-        let mid = brake_fade(600.0);
+        let mid = brake_fade(600.0, FADE_START);
         assert!(mid < 1.0 && mid > FADE_FLOOR);
         // nad plným fade = podlaha (a zůstane, neklesá dál)
-        assert!(approx(brake_fade(FADE_FULL), FADE_FLOOR));
-        assert!(approx(brake_fade(2000.0), FADE_FLOOR));
+        assert!(approx(brake_fade(FADE_FULL, FADE_START), FADE_FLOOR));
+        assert!(approx(brake_fade(2000.0, FADE_START), FADE_FLOOR));
+        // nižší práh (měkčí brzda) fadne dřív: při 500 °C už slábne, default drží plný
+        assert!(brake_fade(500.0, 400.0) < brake_fade(500.0, FADE_START));
     }
 
     #[test]
     fn grip_mult_window() {
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
         // v provozním okně = neutrální (žádná změna Pacejky)
-        assert_eq!(grip_mult(90.0), 1.0);
-        assert_eq!(grip_mult(WIN_LO), 1.0);
-        assert_eq!(grip_mult(WIN_HI), 1.0);
+        assert_eq!(grip_mult(90.0, WIN_LO, WIN_HI), 1.0);
+        assert_eq!(grip_mult(WIN_LO, WIN_LO, WIN_HI), 1.0);
+        assert_eq!(grip_mult(WIN_HI, WIN_LO, WIN_HI), 1.0);
         // studená i přehřátá < 1.0
-        assert!(grip_mult(TIRE_COLD - 10.0) < 1.0);
-        assert!(grip_mult(TIRE_HOT + 20.0) < 1.0);
+        assert!(grip_mult(TIRE_COLD - 10.0, WIN_LO, WIN_HI) < 1.0);
+        assert!(grip_mult(TIRE_HOT + 20.0, WIN_LO, WIN_HI) < 1.0);
         // cold-start ambient je pod oknem → < 1.0 (zahřeje se do okna při jízdě)
-        assert!(grip_mult(T_AMBIENT) < 1.0);
+        assert!(grip_mult(T_AMBIENT, WIN_LO, WIN_HI) < 1.0);
         // podlahy
-        assert!(approx(grip_mult(0.0), GRIP_COLD));
-        assert!(approx(grip_mult(300.0), GRIP_HOT));
+        assert!(approx(grip_mult(0.0, WIN_LO, WIN_HI), GRIP_COLD));
+        assert!(approx(grip_mult(300.0, WIN_LO, WIN_HI), GRIP_HOT));
+        // posunuté okno (kompound): při 108 °C default už fadne, širší okno drží plató
+        assert_eq!(grip_mult(108.0, WIN_LO, 115.0), 1.0);
+        assert!(grip_mult(108.0, WIN_LO, WIN_HI) < 1.0);
     }
 
     #[test]
@@ -263,21 +312,28 @@ mod tests {
         // idle stojící se ustálí kolem ~90 °C (laděno)
         let mut idle = 90.0;
         for _ in 0..60 * 300 {
-            idle = engine_step(idle, true, 0.0, 0.0, 30.0, dt);
+            idle = engine_step(idle, true, 0.0, 0.0, 30.0, dt, ENGINE_H0, ENGINE_H1);
         }
         assert!((80.0..100.0).contains(&idle), "idle={idle}");
         // 2 min plné zátěže bez airflow (v=0) → přehřátí
         let mut hot = 90.0;
         for _ in 0..60 * 120 {
-            hot = engine_step(hot, true, 1.0, 0.0, 30.0, dt);
+            hot = engine_step(hot, true, 1.0, 0.0, 30.0, dt, ENGINE_H0, ENGINE_H1);
         }
         assert!(hot > ENGINE_OVERHEAT, "sustained load nepřehřálo: {hot}");
         // chcíplý (running=false) chladne k ambient
         let mut cool = 120.0;
         for _ in 0..60 * 300 {
-            cool = engine_step(cool, false, 0.0, 20.0, 30.0, dt);
+            cool = engine_step(cool, false, 0.0, 20.0, 30.0, dt, ENGINE_H0, ENGINE_H1);
         }
         assert!(cool < 40.0, "nevychladlo: {cool}");
+        // lepší chladič (vyšší h0/h1) drží nižší ustálenou teplotu při stejné zátěži
+        let (mut stock, mut race) = (90.0, 90.0);
+        for _ in 0..60 * 120 {
+            stock = engine_step(stock, true, 0.6, 20.0, 30.0, dt, ENGINE_H0, ENGINE_H1);
+            race = engine_step(race, true, 0.6, 20.0, 30.0, dt, 110.0, 50.0);
+        }
+        assert!(race < stock, "race cooler nechladí líp: race={race} stock={stock}");
     }
 
     #[test]
@@ -289,7 +345,7 @@ mod tests {
         let start = th.brake_c;
         // 10 s brzdění + skluz při 28 m/s
         for _ in 0..600 {
-            integrate(&mut th, true, 1000.0, 80.0, 0.33, slipping, 28.0, T_AMBIENT, dt);
+            integrate(&mut th, BRAKE_C_FRONT, 1000.0, 80.0, 0.33, slipping, 28.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE);
         }
         assert!(th.brake_c > start + 50.0, "brake_c={}", th.brake_c);
         assert!(th.tire_surf_c > start + 20.0, "surf={}", th.tire_surf_c);
@@ -301,7 +357,7 @@ mod tests {
         let mut bo = crate::solver::WheelThermal::default();
         let before = bo.tire_surf_c;
         for _ in 0..120 {
-            integrate(&mut bo, false, 0.0, 100.0, 0.33, slipping, 0.0, T_AMBIENT, dt);
+            integrate(&mut bo, BRAKE_C_REAR, 0.0, 100.0, 0.33, slipping, 0.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE);
         }
         assert!(bo.tire_surf_c > before + 30.0, "burnout surf={}", bo.tire_surf_c);
 
@@ -310,7 +366,7 @@ mod tests {
         let mut warm = crate::solver::WheelThermal::default();
         let cruise = WheelTelem { fz: 3500.0, slip_ratio: 0.0, slip_angle: 0.0, f_long: 0.0, f_lat: 0.0 };
         for _ in 0..3600 {
-            integrate(&mut warm, true, 0.0, 20.0 / 0.33, 0.33, cruise, 20.0, T_AMBIENT, dt); // roll = v → 0 skluz
+            integrate(&mut warm, BRAKE_C_FRONT, 0.0, 20.0 / 0.33, 0.33, cruise, 20.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE); // roll = v → 0 skluz
         }
         assert!(warm.tire_surf_c > 55.0, "warm-up surf={}", warm.tire_surf_c);
 
@@ -319,10 +375,65 @@ mod tests {
         let hot_s = th.tire_surf_c;
         let rolling = WheelTelem::default();
         for _ in 0..3000 {
-            integrate(&mut th, true, 0.0, 80.0, 0.33, rolling, 28.0, T_AMBIENT, dt);
+            integrate(&mut th, BRAKE_C_FRONT, 0.0, 80.0, 0.33, rolling, 28.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE);
         }
         assert!(th.brake_c < hot_b, "brzda nechladne: {}", th.brake_c);
         assert!(th.tire_surf_c < hot_s, "povrch nechladne: {}", th.tire_surf_c);
+    }
+
+    // ZÁRUKA no-change: default díly (Fáze 1 thermal→parts) musí nést PŘESNĚ current
+    // konstanty → osazení stock dílu = beze změny feelu. Kdyby někdo hnul defaultem, spadne.
+    #[test]
+    fn default_parts_equal_constants() {
+        use crate::vehicle::{Brakes, Compound, Cooler};
+        let c = Compound::default();
+        assert_eq!(c.grip, 1.0);
+        assert_eq!(c.win_lo, WIN_LO);
+        assert_eq!(c.win_hi, WIN_HI);
+        assert_eq!(c.wear_rate, WEAR_RATE);
+        assert_eq!(c.press_sens, 0.0); // tlak grip nemění na stock (neutrální vrstva)
+        let cool = Cooler::default();
+        assert_eq!(cool.h0, ENGINE_H0);
+        assert_eq!(cool.h1, ENGINE_H1);
+        // Brakes default (přes Loadout) = kapacity + fade práh z konstant
+        let b = crate::vehicle::Loadout::default().brakes;
+        assert_eq!(b.c_front, BRAKE_C_FRONT);
+        assert_eq!(b.c_rear, BRAKE_C_REAR);
+        assert_eq!(b.fade_start, FADE_START);
+    }
+
+    #[test]
+    fn tire_pressure_and_grip() {
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // horká pneu = vyšší tlak než studená (v ambient = base)
+        assert!(approx(tire_pressure(T_AMBIENT, 2.0, T_AMBIENT), 2.0));
+        assert!(tire_pressure(120.0, 2.0, T_AMBIENT) > 2.0);
+        // default kompound (sens 0) = grip ×1.00 VŽDY, i horká/studená → grip zaparkovaný
+        assert_eq!(pressure_grip(T_AMBIENT, 2.0, T_AMBIENT, WIN_LO, WIN_HI, 0.0), 1.0);
+        assert_eq!(pressure_grip(140.0, 2.0, T_AMBIENT, WIN_LO, WIN_HI, 0.0), 1.0);
+        // citlivý kompound (sens>0): v okně ~ideál (×1.0), přehřátý mimo okno ztrácí
+        let win_mid = 0.5 * (WIN_LO + WIN_HI);
+        assert!(approx(pressure_grip(win_mid, 2.0, T_AMBIENT, WIN_LO, WIN_HI, 0.15), 1.0));
+        assert!(pressure_grip(150.0, 2.0, T_AMBIENT, WIN_LO, WIN_HI, 0.15) < 1.0);
+        // strop ztráty
+        assert!(pressure_grip(1000.0, 2.0, T_AMBIENT, WIN_LO, WIN_HI, 5.0) >= PRESS_GRIP_FLOOR);
+    }
+
+    #[test]
+    fn asymmetric_heating_from_fz() {
+        // Přenos váhy: vnější kolo v zatáčce nese víc Fz → víc boční síly → hřeje víc.
+        // Per-kolo integrate krmené SKUTEČNÝM telem.fz (a silami ∝ Fz) → asymetrie sama.
+        let dt = 1.0 / 60.0;
+        let alpha = 0.1_f32; // stejný skluzový úhel obou kol
+        // vnější: velký Fz + velká boční síla; vnitřní: půlka
+        let outer = WheelTelem { fz: 5000.0, slip_ratio: 0.0, slip_angle: alpha, f_long: 0.0, f_lat: 4500.0 };
+        let inner = WheelTelem { fz: 2500.0, slip_ratio: 0.0, slip_angle: alpha, f_long: 0.0, f_lat: 2250.0 };
+        let (mut o, mut i) = (crate::solver::WheelThermal::default(), crate::solver::WheelThermal::default());
+        for _ in 0..600 {
+            integrate(&mut o, BRAKE_C_FRONT, 0.0, 20.0 / 0.33, 0.33, outer, 20.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE);
+            integrate(&mut i, BRAKE_C_FRONT, 0.0, 20.0 / 0.33, 0.33, inner, 20.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE);
+        }
+        assert!(o.tire_surf_c > i.tire_surf_c, "outer={} inner={}", o.tire_surf_c, i.tire_surf_c);
     }
 
     #[test]
@@ -335,14 +446,24 @@ mod tests {
         let slip = WheelTelem { fz: 4000.0, slip_ratio: 1.0, slip_angle: 0.0, f_long: 3000.0, f_lat: 0.0 };
         let mut th = crate::solver::WheelThermal::default();
         for _ in 0..60 * 120 {
-            integrate(&mut th, false, 0.0, 120.0, 0.33, slip, 0.0, T_AMBIENT, dt);
+            integrate(&mut th, BRAKE_C_REAR, 0.0, 120.0, 0.33, slip, 0.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE);
         }
         assert!(th.burst, "neprasklo: wear={}", th.wear);
+        // měkčí kompound (vyšší wear_rate) se sdře rychleji za stejný skluz. Krátce (1 s),
+        // ať oba zůstanou pod stropem wear (1.2) a je vidět poměr.
+        let mut soft = crate::solver::WheelThermal::default();
+        let mut hard = crate::solver::WheelThermal::default();
+        for _ in 0..60 {
+            integrate(&mut soft, BRAKE_C_REAR, 0.0, 120.0, 0.33, slip, 0.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE * 1.5);
+            integrate(&mut hard, BRAKE_C_REAR, 0.0, 120.0, 0.33, slip, 0.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE * 0.6);
+        }
+        assert!(soft.wear < 1.2 && hard.wear < 1.2, "saturace: soft={} hard={}", soft.wear, hard.wear);
+        assert!(soft.wear > hard.wear, "soft={} hard={}", soft.wear, hard.wear);
         // klidná jízda (bez skluzu) skoro neobrušuje
         let cruise = WheelTelem { fz: 3500.0, slip_ratio: 0.0, slip_angle: 0.0, f_long: 0.0, f_lat: 0.0 };
         let mut easy = crate::solver::WheelThermal::default();
         for _ in 0..60 * 60 {
-            integrate(&mut easy, true, 0.0, 20.0 / 0.33, 0.33, cruise, 20.0, T_AMBIENT, dt);
+            integrate(&mut easy, BRAKE_C_FRONT, 0.0, 20.0 / 0.33, 0.33, cruise, 20.0, T_AMBIENT, dt, WIN_HI, WEAR_RATE);
         }
         assert!(easy.wear < 0.05, "klidná jízda moc obrušuje: {}", easy.wear);
     }

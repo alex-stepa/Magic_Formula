@@ -160,7 +160,9 @@ pub struct Loadout {
     pub engine_spec: EngineSpec,  // laděný parametry (slidery v garáži) → generuje engine
     pub engine: Engine,           // vygenerovaný z engine_spec (cache pro solver/HUD)
     pub gearbox: Gearbox,         // namontovaná převodovka
-    pub brakes: Brakes,           // namontované brzdy (moment per náprava)
+    pub brakes: Brakes,           // namontované brzdy (moment per náprava + thermal)
+    pub compound: Compound,       // namontovaná pneu (kompound: grip/okno/wear vrstva)
+    pub cooler: Cooler,           // namontovaný chladič (odvod tepla motoru)
     pub layout: DriveLayout,      // FWD/RWD/AWD (přepínatelné)
     pub front_diff: Differential, // diff přední osy
     pub rear_diff: Differential,  // diff zadní osy
@@ -175,7 +177,16 @@ impl Default for Loadout {
             engine: EngineSpec::default().build(),
             gearbox: Gearbox { ratios: vec![3.5, 2.1, 1.4, 1.0, 0.8], final_drive: 3.9 },
             // ~65/35 dopředu (přenos zátěže při brzdění); parking dle dřívějšího Space=1500
-            brakes: Brakes { front: 1000.0, rear: 550.0, parking: 1500.0 },
+            brakes: Brakes {
+                front: 1000.0,
+                rear: 550.0,
+                parking: 1500.0,
+                c_front: brake_c_front_default(),
+                c_rear: brake_c_rear_default(),
+                fade_start: fade_start_default(),
+            },
+            compound: Compound::default(), // neutrální (grip ×1.0, okno/wear = current)
+            cooler: Cooler::default(),     // stock chladič (h0/h1 = current)
             layout: DriveLayout::Rwd,               // start: zadní pohon
             front_diff: Differential { lock: 0.0 }, // start: otevřené
             rear_diff: Differential { lock: 0.0 },
@@ -299,6 +310,86 @@ pub struct Brakes {
     pub front: f32,
     pub rear: f32,
     pub parking: f32,
+    // Thermal (díl): tepelná kapacita kotoučů + práh fade. serde default = current konstanty,
+    // aby staré .veh bez těchto polí načetly beze změny (Fáze 1 thermal→parts).
+    #[serde(default = "brake_c_front_default")]
+    pub c_front: f32, // J/°C přední (default BRAKE_C_FRONT)
+    #[serde(default = "brake_c_rear_default")]
+    pub c_rear: f32, // J/°C zadní (default BRAKE_C_REAR)
+    #[serde(default = "fade_start_default")]
+    pub fade_start: f32, // °C práh fade (default FADE_START)
+}
+fn brake_c_front_default() -> f32 {
+    crate::thermal::BRAKE_C_FRONT
+}
+fn brake_c_rear_default() -> f32 {
+    crate::thermal::BRAKE_C_REAR
+}
+fn fade_start_default() -> f32 {
+    crate::thermal::FADE_START
+}
+
+// Pneu díl (kompound). VRSTVA nad gripem — default NEUTRÁLNÍ (grip ×1.00, okno/wear = current
+// konstanty) → beze změny feelu. Měkká = víc grip, rychle sjetá. `pressure` drží base tlak pro
+// Fáze 2 (tlak→grip), teď se jen uchovává. Katalog: assets/parts/tire.json.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Compound {
+    pub grip: f32,      // multiplikátor nad tire.friction (1.0 = neutrální)
+    pub win_lo: f32,    // provozní okno lo (°C, default WIN_LO)
+    pub win_hi: f32,    // provozní okno hi (°C, default WIN_HI)
+    pub wear_rate: f32, // wear za J skluzové práce (default WEAR_RATE)
+    pub pressure: f32,  // base (studený) tlak (bar) — teplota ho zvedá (thermal::tire_pressure)
+    // Citlivost gripu na odchylku tlaku od ideálu. 0 = tlak grip nemění (neutrální default,
+    // grip zaparkovaný). >0 = úzký kompound: mimo tlakové okno ztrácí. serde default → 0.
+    #[serde(default)]
+    pub press_sens: f32,
+}
+impl Default for Compound {
+    fn default() -> Self {
+        Self {
+            grip: 1.0,
+            win_lo: crate::thermal::WIN_LO,
+            win_hi: crate::thermal::WIN_HI,
+            wear_rate: crate::thermal::WEAR_RATE,
+            pressure: 2.0,
+            press_sens: 0.0,
+        }
+    }
+}
+
+// Chladič (díl). Zvedá odvod tepla motoru (h0 pasivní, h1 radiátor ∝ rychlost) → míň přehřívá.
+// Default = current konstanty (stock chladič). Katalog: assets/parts/cooler.json.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Cooler {
+    pub h0: f32, // pasivní odvod (W/°C, default ENGINE_H0)
+    pub h1: f32, // radiátor konvekce (W/°C na m/s, default ENGINE_H1)
+}
+impl Default for Cooler {
+    fn default() -> Self {
+        Self { h0: crate::thermal::ENGINE_H0, h1: crate::thermal::ENGINE_H1 }
+    }
+}
+
+// Palivo v nádrži. Ubývá ∝ zátěž motoru (rpm_frac × plyn) → auto lehčí → rychlejší, ale
+// míň přítlaku (grip přes Fz). Solver čte hmotu z fuel_nodes (rohy karoserie). Reset na
+// plnou při spawnu (garage_spawn). ponytail: prázdná nádrž zatím jen přestane ubírat hmotu
+// (motor nechcípne) — stall na sucho až bude potřeba.
+pub const FUEL_DENSITY: f32 = 0.75; // kg/L (benzin) — pro převod na litry v HUD
+pub const FUEL_BURN: f32 = 0.05; // kg/s při plné zátěži (load=1); kalibrační knob
+#[derive(Resource)]
+pub struct FuelState {
+    pub kg: f32,
+    pub capacity_kg: f32,
+}
+impl Default for FuelState {
+    fn default() -> Self {
+        Self { kg: 40.0, capacity_kg: 40.0 } // ~53 L
+    }
+}
+impl FuelState {
+    pub fn liters(&self) -> f32 {
+        self.kg / FUEL_DENSITY
+    }
 }
 
 // Rozvod pohonu = nastavení (data). Které osy táhnou + jak se mezi ně dělí moment.
@@ -541,6 +632,9 @@ pub fn spawn_solver_car(
         }
     }
     sb.chassis = Some(ChassisFrame { front, rear, left, right });
+    // nádrž = rohy karoserie: palivo jim za jízdy přidává/ubírá hmotu (grip přes Fz + accel)
+    sb.fuel_nodes = body.clone();
+    sb.fuel_base_mass = vec![body_mass; body.len()];
     // plný graf přes 8 rohů = 28 beamů → tuhý rám
     for a in 0..body.len() {
         for b in (a + 1)..body.len() {
@@ -824,6 +918,18 @@ pub fn spawn_softbody(
             .id();
         let i = sb.add_node(origin + veh_pos(node.pos), node.mass, entity);
         node_idx.insert(node.id.as_str(), (entity, i));
+    }
+
+    // Nádrž u .veh: nemá „rohy karoserie" jako test auto → vezmi nody nejblíž těžišti (tank ~
+    // střed vozu). Palivo jim za jízdy mění hmotu (grip/accel). Huby kol se přidají až níž,
+    // takže tady je vybrat nemůžeme (a nemáme).
+    let live: Vec<usize> = (0..sb.pos.len()).filter(|&n| sb.inv_mass[n] > 0.0).collect();
+    if !live.is_empty() {
+        let centroid = live.iter().map(|&n| sb.pos[n]).sum::<Vec3>() / live.len() as f32;
+        let mut idx = live;
+        idx.sort_by(|&a, &b| sb.pos[a].distance_squared(centroid).total_cmp(&sb.pos[b].distance_squared(centroid)));
+        sb.fuel_nodes = idx.into_iter().take(6).collect();
+        sb.fuel_base_mass = sb.fuel_nodes.iter().map(|&n| 1.0 / sb.inv_mass[n]).collect();
     }
 
     // Beamy → BeamC do solveru. REÁLNÁ tuhost i tlumení z .veh — pružina (k>0, d=0)
@@ -1158,6 +1264,7 @@ pub fn vehicle_drive(
     mut state: ResMut<DrivetrainState>,
     mut sb: ResMut<SoftBody>,
     mut aids: ResMut<DriverAids>,
+    mut fuel: ResMut<FuelState>,
 ) {
     // Testovací jízda (tlačítko TEST) drží plný plyn — hands-free měření 0–100.
     let throttle = if test.0 || keys.pressed(KeyCode::KeyW) { 1.0 } else { 0.0 };
@@ -1239,8 +1346,36 @@ pub fn vehicle_drive(
     // (dlouhá zátěž bez airflow) sráží výkon výš přes engine_power_factor. Cooler part = časem.
     let load = (state.rpm / loadout.engine.max_rpm.max(1.0)) * throttle;
     let v_ms = state.speed_kmh / 3.6;
-    state.engine_c =
-        crate::thermal::engine_step(state.engine_c, !state.stalled, load, v_ms, ambient.0, time.delta_secs());
+    state.engine_c = crate::thermal::engine_step(
+        state.engine_c,
+        !state.stalled,
+        load,
+        v_ms,
+        ambient.0,
+        time.delta_secs(),
+        loadout.cooler.h0,
+        loadout.cooler.h1,
+    );
+
+    // PALIVO: ubývá ∝ zátěž běžícího motoru → auto lehčí. Hmota se rozloží na rohy karoserie
+    // (fuel_nodes) přepočtem inv_mass. Míň paliva = rychlejší rozjezd, ale míň Fz (grip).
+    // Prázdná nádrž jen přestane ubírat (motor běží dál). ponytail: substeps se přepočítají jen
+    // při spawnu (plná nádrž) — úbytek ~25 % hmoty je v CFL marži, per-frame recompute netřeba.
+    if !state.stalled {
+        fuel.kg = (fuel.kg - FUEL_BURN * load.clamp(0.0, 1.0) * time.delta_secs()).max(0.0);
+    }
+    // Prázdná nádrž = motor chcípne (žádné spalování). Nastartovat (Shift+R) na sucho hned
+    // zhasne — realistické.
+    if fuel.kg <= 0.0 {
+        state.stalled = true;
+    }
+    if !sb.fuel_nodes.is_empty() {
+        let share = fuel.kg / sb.fuel_nodes.len() as f32;
+        for k in 0..sb.fuel_nodes.len() {
+            let n = sb.fuel_nodes[k];
+            sb.inv_mass[n] = 1.0 / (sb.fuel_base_mass[k] + share);
+        }
+    }
 
     // Na kola jde moment SPOJKY (ne motoru) × převod — co spojka nepřenese, neexistuje.
     let total = t_clutch * total_ratio;
@@ -1272,7 +1407,7 @@ pub fn vehicle_drive(
         } + if parking && !wheel.front { loadout.brakes.parking } else { 0.0 };
         // Fade: horké brzdy dávají míň momentu (crate::thermal). Násobí celý moment
         // včetně ručky — přehřátá brzda slábne bez ohledu na zdroj sešlápnutí.
-        wheel.brake *= crate::thermal::brake_fade(wheel.thermal.brake_c);
+        wheel.brake *= crate::thermal::brake_fade(wheel.thermal.brake_c, loadout.brakes.fade_start);
         // ABS: kolo se zamyká (κ hodně záporná = pomalejší než vozovka) → uvolni brzdu,
         // ať se roztočí zpět. Pulzuje přes práh (Update-rate) = ABS regulace.
         if aids.abs && wheel.brake > 0.0 && wheel.telem.slip_ratio < -ABS_SLIP {
