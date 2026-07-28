@@ -1,19 +1,22 @@
 // Herní HUD podle návrhu: rally dash (styl Sinco Tech — RPM bar se segmenty,
 // shift LED, velká rychlost, kvalt) + telemetrie overlay na T + pauza na Esc.
 
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 
 use crate::solver::SoftBody;
+use crate::ui::settings::SettingsUi;
 use crate::ui::*;
 use crate::vehicle::{DrivetrainState, Loadout};
 
 pub fn plugin(app: &mut App) {
     app.init_resource::<AccelTimer>()
-        .add_systems(OnEnter(AppState::Game), spawn_hud)
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        .add_systems(OnEnter(AppState::Game), (spawn_hud, spawn_temps))
         .add_systems(OnExit(AppState::Game), |mut p: ResMut<Paused>| p.0 = false)
         .add_systems(
             Update,
-            (esc_pause, toggle_telemetry_panel, sync_node_viz, sync_pause_overlay, pause_buttons, update_dash, update_telemetry)
+            (esc_pause, toggle_telemetry_panel, toggle_temps_panel, sync_node_viz, sync_pause_overlay, pause_buttons, update_dash, update_telemetry, update_temps, update_fps)
                 .run_if(in_state(AppState::Game)),
         )
         .add_systems(Update, accel_timer.run_if(in_game_unpaused));
@@ -112,9 +115,12 @@ struct RecText; // „● REC → CSV" v hlavičce overlay
 
 #[derive(Component)]
 struct PauseOverlay;
+#[derive(Component)]
+struct FpsText;
 #[derive(Component, Clone, Copy)]
 enum PauseAction {
     Resume,
+    Settings,
     Garage,
     Title,
 }
@@ -124,6 +130,64 @@ const LEDS: usize = 8; // shift LED (posledních ~2 = „červená" zóna)
 const UNLIT: Color = Color::srgba(0.949, 0.949, 0.953, 0.14);
 const LCD_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.35);
 const PANEL_BG: Color = Color::srgba(0.114, 0.176, 0.239, 0.92); // accent-900 ~92 %
+// Panel TEPLOTY (toggle G, vlevo dole): bary brzda/pneu/opotřebení per kolo + motor.
+// Fill node = šířka % (podíl v rozsahu) + barva z gradientu; label = číslo (°C / %).
+#[derive(Component)]
+struct TempsPanel;
+#[derive(Clone, Copy, PartialEq)]
+enum TempKind {
+    Brake,
+    Tire,
+    Wear,
+    Engine,
+}
+#[derive(Component)]
+struct TempFill(TempKind, usize); // (druh, index kola; Engine kolo ignoruje)
+#[derive(Component)]
+struct TempLabel(TempKind, usize); // číslo pod barem
+
+// Gradient barva dle podílu: modrá (studená 0.0) → zelená (optimum 0.55) → červená (horká 1.0).
+// Stejná paleta jako blueprint redesign (accent-blue / green / red).
+fn grad_color(f: f32) -> Color {
+    let f = f.clamp(0.0, 1.0);
+    let (ap, a, bp, b) = if f <= 0.55 {
+        (0.0f32, [89.0, 128.0, 166.0], 0.55f32, [92.0, 168.0, 110.0])
+    } else {
+        (0.55f32, [92.0, 168.0, 110.0], 1.0f32, [199.0, 84.0, 66.0])
+    };
+    let lf = (f - ap) / (bp - ap);
+    let ch = |i: usize| (a[i] + (b[i] - a[i]) * lf) / 255.0;
+    Color::srgb(ch(0), ch(1), ch(2))
+}
+
+// Podíl v rozsahu (0..1) — rozsahy z redesignu (display, ne fyzikální stropy).
+fn temp_frac(kind: TempKind, v: f32) -> f32 {
+    let (lo, hi) = match kind {
+        TempKind::Brake => (80.0, 650.0),
+        TempKind::Tire => (40.0, 115.0),
+        TempKind::Wear => (0.0, 100.0),
+        TempKind::Engine => (60.0, 115.0),
+    };
+    ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
+}
+
+// Hodnota (pro frac) + text (pro label) daného druhu/kola.
+fn temp_read(sb: &SoftBody, engine_c: f32, kind: TempKind, wheel: usize) -> (f32, String) {
+    match kind {
+        TempKind::Engine => (engine_c, format!("{engine_c:.0}°C")),
+        _ => match sb.wheels.get(wheel) {
+            Some(w) => match kind {
+                TempKind::Brake => (w.thermal.brake_c, format!("{:.0}°C", w.thermal.brake_c)),
+                TempKind::Tire => (w.thermal.tire_surf_c, format!("{:.0}°C", w.thermal.tire_surf_c)),
+                _ => {
+                    let pct = w.thermal.wear * 100.0;
+                    (pct, if w.thermal.burst { "PRASK".into() } else { format!("{pct:.0}%") })
+                }
+            },
+            None => (0.0, "—".into()),
+        },
+    }
+}
 
 fn spawn_hud(mut commands: Commands, fonts: Res<UiFonts>, map: Res<SelectedMap>) {
     // ── top-right: režim + mapa ──
@@ -162,7 +226,7 @@ fn spawn_hud(mut commands: Commands, fonts: Res<UiFonts>, map: Res<SelectedMap>)
             StateScoped(AppState::Game),
         ))
         .with_children(|p| {
-            for chip in ["T — TELEMETRIE", "ESC — PAUZA"] {
+            for chip in ["G — TEPLOTY", "T — TELEMETRIE", "ESC — PAUZA"] {
                 p.spawn((
                     Node {
                         padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
@@ -176,6 +240,25 @@ fn spawn_hud(mut commands: Commands, fonts: Res<UiFonts>, map: Res<SelectedMap>)
                     c.spawn(txt(chip, &fonts.body, 11.0, Color::srgba(0.949, 0.949, 0.953, 0.8)));
                 });
             }
+        });
+
+    // ── FPS counter (top-left, pod chipy) — stejný chip styl jako hinty ──
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(52.0),
+                left: Val::Px(24.0),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(5.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+            BorderColor(DIVIDER),
+            StateScoped(AppState::Game),
+        ))
+        .with_children(|p| {
+            p.spawn((txt("— FPS", &fonts.mono, 11.0, Color::srgba(0.949, 0.949, 0.953, 0.8)), FpsText));
         });
 
     // ── dash panel (pravý dolní roh) ──
@@ -431,6 +514,7 @@ fn spawn_hud(mut commands: Commands, fonts: Res<UiFonts>, map: Res<SelectedMap>)
                     ));
                     for (action, label, primary) in [
                         (PauseAction::Resume, "POKRAČOVAT — RESUME", true),
+                        (PauseAction::Settings, "NASTAVENÍ — SETTINGS", false),
                         (PauseAction::Garage, "GARÁŽ — GARAGE", false),
                         (PauseAction::Title, "HLAVNÍ MENU — MAIN MENU", false),
                     ] {
@@ -453,6 +537,7 @@ fn spawn_hud(mut commands: Commands, fonts: Res<UiFonts>, map: Res<SelectedMap>)
                             t.spawn(txt(label, &fonts.heading, 16.0, if primary { BG } else { TEXT }));
                         });
                     }
+
                     card.spawn((
                         Node {
                             margin: UiRect::top(Val::Px(8.0)),
@@ -476,7 +561,11 @@ fn spawn_hud(mut commands: Commands, fonts: Res<UiFonts>, map: Res<SelectedMap>)
 
 // ── systémy ──────────────────────────────────────────────────────────────────
 
-fn esc_pause(keys: Res<ButtonInput<KeyCode>>, mut paused: ResMut<Paused>) {
+fn esc_pause(keys: Res<ButtonInput<KeyCode>>, mut paused: ResMut<Paused>, settings_ui: Res<SettingsUi>) {
+    // Když je otevřené nastavení, Esc ho zavře (settings_esc) — pauzu netoggluj.
+    if settings_ui.open {
+        return;
+    }
     if keys.just_pressed(KeyCode::Escape) {
         paused.0 = !paused.0;
     }
@@ -521,6 +610,7 @@ fn sync_pause_overlay(paused: Res<Paused>, mut overlay: Query<&mut Node, With<Pa
 fn pause_buttons(
     interactions: Query<(&Interaction, &PauseAction), Changed<Interaction>>,
     mut paused: ResMut<Paused>,
+    mut settings_ui: ResMut<SettingsUi>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     for (interaction, action) in &interactions {
@@ -529,9 +619,18 @@ fn pause_buttons(
         }
         match action {
             PauseAction::Resume => paused.0 = false,
+            PauseAction::Settings => settings_ui.open = true,
             PauseAction::Garage => next.set(AppState::Garage),
             PauseAction::Title => next.set(AppState::Title),
         }
+    }
+}
+
+// FPS counter — vyhlazená hodnota z FrameTimeDiagnosticsPlugin.
+fn update_fps(diag: Res<DiagnosticsStore>, mut q: Query<&mut Text, With<FpsText>>) {
+    let Some(fps) = diag.get(&FrameTimeDiagnosticsPlugin::FPS).and_then(|d| d.smoothed()) else { return };
+    for mut t in &mut q {
+        t.0 = format!("{fps:.0} FPS");
     }
 }
 
@@ -541,6 +640,7 @@ fn update_dash(
     loadout: Res<Loadout>,
     state: Res<DrivetrainState>,
     accel: Res<AccelTimer>,
+    sb: Res<SoftBody>,
     mut segs: Query<(&RpmSeg, &mut BackgroundColor), (Without<ShiftLed>,)>,
     mut leds: Query<(&ShiftLed, &mut BackgroundColor), (With<ShiftLed>, Without<RpmSeg>)>,
     mut texts: ParamSet<(
@@ -580,10 +680,23 @@ fn update_dash(
         };
     }
     if let Ok(mut text) = texts.p3().get_single_mut() {
+        let hot_brake = sb.wheels.iter().map(|w| w.thermal.brake_c).fold(0.0_f32, f32::max);
+        let hot_tire = sb.wheels.iter().map(|w| w.thermal.tire_surf_c).fold(0.0_f32, f32::max);
+        let cold_tire = sb.wheels.iter().map(|w| w.thermal.tire_surf_c).fold(f32::MAX, f32::min);
         text.0 = if state.stalled {
             "CHCÍPLO — nastartuj R".into()
+        } else if sb.wheels.iter().any(|w| w.thermal.burst) {
+            "PNEU PRASKLÁ".into()
         } else if state.clutch < 0.95 {
             "SPOJKA".into()
+        } else if hot_brake > crate::thermal::FADE_START {
+            "BRZDY HORKÉ".into()
+        } else if state.engine_c > crate::thermal::ENGINE_OVERHEAT {
+            "MOTOR HORKÝ".into()
+        } else if hot_tire > crate::thermal::TIRE_HOT {
+            "PNEU PŘEHŘÁTÉ".into()
+        } else if cold_tire < crate::thermal::TIRE_COLD {
+            "PNEU STUDENÉ".into()
         } else {
             String::new()
         };
@@ -594,6 +707,121 @@ fn update_dash(
             (None, Some(_)) => "0–100: …".into(),
             _ => "0–100: —".into(),
         };
+    }
+}
+
+// Panel TEPLOTY (toggle G, vlevo dole, default open) dle redesignu: hlavička + sloupcové
+// popisky, 4 řádky kol (label + 3 bary brzda/pneu/opot, každý s číslem pod barem) + motor
+// (coolant) dole. Bar = kontejner + fill child (šířka % + gradient barva). Plní update_temps.
+fn spawn_temps(mut commands: Commands, fonts: Res<UiFonts>) {
+    let wheels = ["FL", "FR", "RL", "RR"];
+    // jedna buňka baru: sloupec [bar][číslo pod ním], zabírá stejný podíl šířky
+    let bar_cell = |r: &mut ChildBuilder, fonts: &UiFonts, kind: TempKind, wheel: usize, align: JustifyContent| {
+        r.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), flex_direction: FlexDirection::Column, row_gap: Val::Px(2.0), ..default() })
+            .with_children(|col| {
+                col.spawn((Node { height: Val::Px(9.0), border: UiRect::all(Val::Px(1.0)), ..default() }, BackgroundColor(LCD_BG), BorderColor(DIVIDER)))
+                    .with_children(|b| {
+                        b.spawn((Node { width: Val::Percent(0.0), height: Val::Percent(100.0), ..default() }, BackgroundColor(grad_color(0.0)), TempFill(kind, wheel)));
+                    });
+                col.spawn(Node { justify_content: align, ..default() }).with_children(|t| {
+                    t.spawn((txt("—", &fonts.mono, 10.0, TEXT_MUTED), TempLabel(kind, wheel)));
+                });
+            });
+    };
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(24.0),
+                bottom: Val::Px(32.0),
+                width: Val::Px(460.0),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::axes(Val::Px(16.0), Val::Px(14.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+            BorderColor(DIVIDER),
+            TempsPanel,
+            StateScoped(AppState::Game),
+        ))
+        .with_children(|p| {
+            // hlavička: název + zarovnaná legenda
+            p.spawn(Node { align_items: AlignItems::Baseline, column_gap: Val::Px(8.0), margin: UiRect::bottom(Val::Px(12.0)), ..default() })
+                .with_children(|h| {
+                    h.spawn(txt("TEPLOTY / TEMPS", &fonts.heading, 13.0, ACCENT_300));
+                    h.spawn((txt("brzda · pneu · opotřebení", &fonts.body, 10.0, TEXT_MUTED), Node { margin: UiRect::left(Val::Auto), ..default() }));
+                });
+            // sloupcové popisky
+            p.spawn(Node { column_gap: Val::Px(10.0), margin: UiRect::bottom(Val::Px(6.0)), ..default() })
+                .with_children(|hr| {
+                    hr.spawn((Node { width: Val::Px(34.0), ..default() },));
+                    for lbl in ["BRZDA", "PNEU", "OPOT."] {
+                        hr.spawn(Node { flex_grow: 1.0, flex_basis: Val::Px(0.0), justify_content: JustifyContent::Center, ..default() })
+                            .with_children(|c| {
+                                c.spawn(txt(lbl, &fonts.body, 9.0, TEXT_MUTED));
+                            });
+                    }
+                });
+            // řádky kol
+            for w in 0..4 {
+                p.spawn(Node { column_gap: Val::Px(10.0), align_items: AlignItems::Center, margin: UiRect::bottom(Val::Px(8.0)), ..default() })
+                    .with_children(|r| {
+                        r.spawn((Node { width: Val::Px(34.0), ..default() },)).with_children(|c| {
+                            c.spawn(txt(wheels[w], &fonts.mono, 11.0, TEXT));
+                        });
+                        bar_cell(r, &fonts, TempKind::Brake, w, JustifyContent::Center);
+                        bar_cell(r, &fonts, TempKind::Tire, w, JustifyContent::Center);
+                        bar_cell(r, &fonts, TempKind::Wear, w, JustifyContent::Center);
+                    });
+            }
+            // motor / coolant (oddělovač nahoře)
+            p.spawn((
+                Node { column_gap: Val::Px(10.0), align_items: AlignItems::Center, border: UiRect::top(Val::Px(1.0)), padding: UiRect::top(Val::Px(10.0)), margin: UiRect::top(Val::Px(2.0)), ..default() },
+                BorderColor(Color::srgba(0.949, 0.949, 0.953, 0.2)),
+            ))
+            .with_children(|r| {
+                r.spawn((Node { width: Val::Px(34.0), ..default() },)).with_children(|c| {
+                    c.spawn(txt("MTR", &fonts.mono, 11.0, TEXT));
+                });
+                bar_cell(r, &fonts, TempKind::Engine, 0, JustifyContent::FlexEnd);
+            });
+        });
+}
+
+// Toggle panelu TEPLOTY klávesou G (default open).
+fn toggle_temps_panel(keys: Res<ButtonInput<KeyCode>>, mut panel: Query<&mut Node, With<TempsPanel>>) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        for mut n in &mut panel {
+            n.display = if n.display == Display::None { Display::Flex } else { Display::None };
+        }
+    }
+}
+
+// Naplní/obarví bary + čísla teplot každý snímek ze stavu kol + motoru.
+fn update_temps(
+    sb: Res<SoftBody>,
+    state: Res<DrivetrainState>,
+    mut fills: Query<(&TempFill, &mut Node, &mut BackgroundColor)>,
+    mut labels: Query<(&TempLabel, &mut Text)>,
+) {
+    for (TempFill(kind, wheel), mut node, mut bg) in &mut fills {
+        let (v, _) = temp_read(&sb, state.engine_c, *kind, *wheel);
+        let f = temp_frac(*kind, v);
+        let pct = Val::Percent((f * 100.0).max(4.0)); // min 4 % ať je i studený bar vidět
+        if node.width != pct {
+            node.width = pct;
+        }
+        let color = grad_color(f);
+        if bg.0 != color {
+            *bg = BackgroundColor(color);
+        }
+    }
+    for (TempLabel(kind, wheel), mut text) in &mut labels {
+        let (_, s) = temp_read(&sb, state.engine_c, *kind, *wheel);
+        if text.0 != s {
+            text.0 = s;
+        }
     }
 }
 
@@ -640,6 +868,8 @@ fn update_telemetry(
         }
     }
 
+    // Teploty/opotřebení jsou teď ve vždy-viditelném panelu TEPLOTY (bary) — telemetrie
+    // drží jen síly/skluz.
     for (TelemCell(row, col), mut text) in &mut cells {
         let s = match sb.wheels.get(*row) {
             Some(w) => match col {

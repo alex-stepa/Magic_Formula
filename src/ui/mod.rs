@@ -12,6 +12,7 @@ pub mod garage;
 pub mod garage_preview;
 pub mod dyno;
 pub mod hud;
+pub mod settings;
 
 // ── Stavy ────────────────────────────────────────────────────────────────────
 
@@ -120,6 +121,6 @@ impl Plugin for UiPlugin {
             .enable_state_scoped_entities::<AppState>()
             .init_resource::<Paused>()
             .init_resource::<SelectedMap>()
-            .add_plugins((title::plugin, garage::plugin, garage_preview::plugin, dyno::plugin, hud::plugin));
+            .add_plugins((title::plugin, garage::plugin, garage_preview::plugin, dyno::plugin, hud::plugin, settings::plugin));
     }
 }

@@ -17,6 +17,7 @@ pub fn plugin(app: &mut App) {
 enum TitleAction {
     Drive,
     Garage,
+    Settings,
 }
 
 // Karta mapy v pickeru; tag „vybráno" má vlastní marker (toggluje se Display).
@@ -127,23 +128,38 @@ fn spawn_title(mut commands: Commands, fonts: Res<UiFonts>) {
                             b.spawn(txt("GARÁŽ", &fonts.heading, 18.0, TEXT));
                             b.spawn(txt("Garage · build", &fonts.body, 12.0, TEXT_MUTED));
                         });
-                        // Rally + Nastavení — zatím neaktivní (ztlumené, bez Button)
-                        for (name, sub) in [("RALLY", "checkpoints · brzy / soon"), ("NASTAVENÍ", "Settings")] {
-                            m.spawn((
-                                Node {
-                                    padding: UiRect::axes(Val::Px(18.0), Val::Px(12.0)),
-                                    column_gap: Val::Px(10.0),
-                                    align_items: AlignItems::Baseline,
-                                    border: UiRect::all(Val::Px(1.0)),
-                                    ..default()
-                                },
-                                BorderColor(Color::srgba(0.949, 0.949, 0.953, 0.10)),
-                            ))
-                            .with_children(|b| {
-                                b.spawn(txt(name, &fonts.heading, 18.0, Color::srgba(0.949, 0.949, 0.953, 0.45)));
-                                b.spawn(txt(sub, &fonts.body, 12.0, Color::srgba(0.949, 0.949, 0.953, 0.35)));
-                            });
-                        }
+                        // Rally — zatím neaktivní (ztlumené, bez Button)
+                        m.spawn((
+                            Node {
+                                padding: UiRect::axes(Val::Px(18.0), Val::Px(12.0)),
+                                column_gap: Val::Px(10.0),
+                                align_items: AlignItems::Baseline,
+                                border: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BorderColor(Color::srgba(0.949, 0.949, 0.953, 0.10)),
+                        ))
+                        .with_children(|b| {
+                            b.spawn(txt("RALLY", &fonts.heading, 18.0, Color::srgba(0.949, 0.949, 0.953, 0.45)));
+                            b.spawn(txt("checkpoints · brzy / soon", &fonts.body, 12.0, Color::srgba(0.949, 0.949, 0.953, 0.35)));
+                        });
+                        // Nastavení — otevře sdílený settings overlay
+                        m.spawn((
+                            Button,
+                            TitleAction::Settings,
+                            Node {
+                                padding: UiRect::axes(Val::Px(18.0), Val::Px(12.0)),
+                                column_gap: Val::Px(10.0),
+                                align_items: AlignItems::Baseline,
+                                border: UiRect::all(Val::Px(1.0)),
+                                ..default()
+                            },
+                            BorderColor(DIVIDER),
+                        ))
+                        .with_children(|b| {
+                            b.spawn(txt("NASTAVENÍ", &fonts.heading, 18.0, TEXT));
+                            b.spawn(txt("Settings", &fonts.body, 12.0, TEXT_MUTED));
+                        });
                     });
                 });
 
@@ -234,6 +250,7 @@ fn title_buttons(
     mut test: ResMut<crate::vehicle::TestDrive>,
     terrain: Res<Terrain>,
     mut next: ResMut<NextState<AppState>>,
+    mut settings_ui: ResMut<crate::ui::settings::SettingsUi>,
 ) {
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -246,6 +263,7 @@ fn title_buttons(
                 next.set(AppState::Game);
             }
             TitleAction::Garage => next.set(AppState::Garage),
+            TitleAction::Settings => settings_ui.open = true,
         }
     }
 }
@@ -260,6 +278,7 @@ fn map_cards(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut terrain: ResMut<Terrain>,
+    mut colliders: ResMut<crate::solver::WorldColliders>,
     mut selected: ResMut<SelectedMap>,
 ) {
     for (interaction, MapCard(kind)) in &interactions {
@@ -274,6 +293,7 @@ fn map_cards(
             &mut materials,
             &mut images,
             &mut terrain,
+            &mut colliders,
             ground.iter().collect::<Vec<_>>(),
             track.iter().collect::<Vec<_>>(),
         );

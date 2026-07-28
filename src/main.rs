@@ -17,6 +17,8 @@ mod stats; // odvozené KPI buildu (výkon/hmotnost/rozložení/0–100) — či
 mod world; // terén jako trait (rovina / kopce / časem OSM heightfield)
 mod ui; // obrazovky: title / garáž / HUD + pauza (stavový automat)
 mod audio; // procedurální zvuk motoru (reaguje na rpm/válce/config)
+mod thermal; // termální model brzd/pneu (teploty → fade + grip okno)
+mod effects; // vizuální efekty pneu (skid marks + kouř)
 
 use solver::*;
 use vehicle::*;
@@ -41,13 +43,18 @@ fn main() {
         .init_resource::<SoftBody>()
         .init_resource::<Loadout>()
         .init_resource::<DrivetrainState>()
+        .init_resource::<thermal::Ambient>()
+        .init_resource::<DriverAids>()
         .init_resource::<TestDrive>()
         .init_resource::<ChassisParams>()
         .insert_resource(parts::load_part_catalog())
         .init_resource::<Terrain>()
+        .init_resource::<WorldColliders>()
+        .add_event::<CrashImpact>()
         .init_resource::<Telemetry>()
         .add_plugins(ui::UiPlugin)
         .add_plugins(audio::EngineSoundPlugin)
+        .add_plugins(effects::TireFxPlugin)
         .add_systems(Startup, setup)
         // FixedUpdate (60 Hz) = náš solver; uvnitř si dělá vlastní substepping.
         // Běží jen ve hře a mimo pauzu — na title/garáži/pauze svět stojí.
@@ -59,7 +66,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                (shift_gears, update_drivetrain, vehicle_drive, vehicle_steer, telemetry_log, camera_control, spawn_shortcuts)
+                (shift_gears, update_drivetrain, vehicle_drive, thermal::wheel_thermal, vehicle_steer, telemetry_log, camera_control, spawn_shortcuts)
                     .chain()
                     .run_if(ui::in_game_unpaused),
                 (softbody_to_transforms, update_softbody_mesh).chain(),
@@ -78,6 +85,7 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     terrain: Res<Terrain>,
+    mut colliders: ResMut<WorldColliders>,
 ) {
     // Kamera ve výšce 8, kus dozadu (z=15), kouká do středu světa (0,0,0).
     commands.spawn(Camera3d::default()).insert(Transform::from_xyz(0.0, 8.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y));
@@ -94,7 +102,7 @@ fn setup(
 
     // Zem + (na testovací ploše) testovací dráha. Default mapa = TestPad (viz Terrain::default).
     spawn_ground(&mut commands, &mut meshes, &mut materials, &mut images, terrain.0.as_ref());
-    build_test_track(&mut commands, &mut meshes, &mut materials);
+    build_test_track(&mut commands, &mut meshes, &mut materials, &mut colliders);
 
     // Auto se na startu NEspawnuje — vybere se v garáži / titulní obrazovce.
 }
@@ -131,7 +139,30 @@ fn spawn_ground(
 // ustálenou zatáčku a zvyšuješ rychlost, sbírá se boční grip) + ROVINKA (rozjezd/brzdění
 // = podélný grip). Značky jsou jen vizuál (fyzika = plochá zem); poloměr 20 m je „pravda"
 // pro binování dat. Volá se jen na TestPad — proto GROUND_TOP stačí místo world.height.
-fn build_test_track(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) {
+fn build_test_track(commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>, colliders: &mut WorldColliders) {
+    // Smashable zeď (crash target) — 12 m široká, 3 m vysoká, 1 m tlustá, 30 m severně od spawnu.
+    // Sloupky skidpadu zůstávají ghost schválně (jezdí se mezi nimi); tvrdý hitbox má jen zeď.
+    let wall_half = Vec3::new(6.0, 1.5, 0.5);
+    let wall_center = Vec3::new(0.0, GROUND_TOP + wall_half.y, -30.0);
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(wall_half.x * 2.0, wall_half.y * 2.0, wall_half.z * 2.0))),
+        MeshMaterial3d(materials.add(Color::srgb(0.55, 0.55, 0.58))),
+        Transform::from_translation(wall_center),
+        TrackProp,
+    ));
+    colliders.0.push(solver::Collider::Box { min: wall_center - wall_half, max: wall_center + wall_half });
+
+    // Pár barelů (válcové hitboxy) před zdí — varied crash target, mimo skidpad (R=20 kolem 0).
+    let barrel_r = 0.5;
+    let barrel_h = 1.2;
+    let barrel = meshes.add(Cylinder::new(barrel_r, barrel_h));
+    let barrel_mat = materials.add(Color::srgb(0.75, 0.35, 0.1));
+    for bx in [-3.0f32, 0.0, 3.0] {
+        let c = Vec3::new(bx, GROUND_TOP + barrel_h * 0.5, -24.0);
+        commands.spawn((Mesh3d(barrel.clone()), MeshMaterial3d(barrel_mat.clone()), Transform::from_translation(c), TrackProp));
+        colliders.0.push(solver::Collider::Cylinder { x: c.x, z: c.z, r: barrel_r, y0: GROUND_TOP, y1: GROUND_TOP + barrel_h });
+    }
+
     let post = meshes.add(Cylinder::new(0.2, 0.6));
     let orange = materials.add(Color::srgb(0.95, 0.45, 0.05));
     let y = GROUND_TOP + 0.3; // značka stojí na zemi (půlka výšky nad povrchem)
@@ -226,6 +257,7 @@ fn rebuild_map(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     terrain: &mut Terrain,
+    colliders: &mut WorldColliders,
     ground: impl IntoIterator<Item = Entity>,
     track: impl IntoIterator<Item = Entity>,
 ) {
@@ -237,8 +269,9 @@ fn rebuild_map(
     for e in track {
         commands.entity(e).despawn_recursive(); // dráha jen na TestPad
     }
+    colliders.0.clear(); // hitboxy dráhy pryč (zeď); TestPad je znovu naplní
     if kind == MapKind::TestPad {
-        build_test_track(commands, meshes, materials);
+        build_test_track(commands, meshes, materials, colliders);
     }
 }
 
@@ -403,7 +436,7 @@ fn telemetry_log(
             match std::fs::File::create(&path) {
                 Ok(f) => {
                     let mut w = std::io::BufWriter::new(f);
-                    let _ = writeln!(w, "loadout_id,t,wheel,front,speed_kmh,fz,slip_ratio,slip_angle_deg,f_long,f_lat");
+                    let _ = writeln!(w, "loadout_id,t,wheel,front,speed_kmh,fz,slip_ratio,slip_angle_deg,f_long,f_lat,brake_c,tire_surf_c,tire_core_c,engine_c,wear");
                     tel.writer = Some(w);
                     tel.t = 0.0;
                     // signatura buildu (bez čárek, ať nerozbije CSV)
@@ -418,15 +451,15 @@ fn telemetry_log(
         return;
     }
     tel.t += time.delta_secs();
-    let (t, speed) = (tel.t, state.speed_kmh);
+    let (t, speed, eng) = (tel.t, state.speed_kmh, state.engine_c);
     // Kola nakopírovat před půjčením writeru (ResMut vs Res<SoftBody> jsou nezávislé).
     let rows: Vec<_> = sb.wheels.iter().enumerate()
-        .map(|(i, w)| (i, w.front, w.telem)).collect();
+        .map(|(i, w)| (i, w.front, w.telem, w.thermal.brake_c, w.thermal.tire_surf_c, w.thermal.tire_core_c, w.thermal.wear)).collect();
     let id = tel.loadout_id.clone();
     let w = tel.writer.as_mut().unwrap();
-    for (i, front, tm) in rows {
-        let _ = writeln!(w, "{id},{t:.3},{i},{},{speed:.2},{:.1},{:.4},{:.3},{:.1},{:.1}",
-            front as u8, tm.fz, tm.slip_ratio, tm.slip_angle.to_degrees(), tm.f_long, tm.f_lat);
+    for (i, front, tm, brake_c, surf_c, core_c, wear) in rows {
+        let _ = writeln!(w, "{id},{t:.3},{i},{},{speed:.2},{:.1},{:.4},{:.3},{:.1},{:.1},{:.1},{:.1},{:.1},{eng:.1},{:.3}",
+            front as u8, tm.fz, tm.slip_ratio, tm.slip_angle.to_degrees(), tm.f_long, tm.f_lat, brake_c, surf_c, core_c, wear);
     }
 }
 

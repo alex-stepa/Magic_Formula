@@ -349,6 +349,7 @@ pub struct DrivetrainState {
     pub clutch: f32,    // 0 = rozpojená (levý Shift), 1 = sepnutá
     pub stalled: bool,  // motor chcíplý (start = R)
     pub speed_kmh: f32, // dopočítaná rychlost (pro HUD)
+    pub engine_c: f32,  // teplota motoru (°C) — přehřátí = ztráta výkonu
 }
 
 // --- SPOJKA + MOTOR JAKO STAV ---
@@ -376,9 +377,25 @@ impl Default for DrivetrainState {
             clutch: 1.0,  // sepnutá (Shift drž při startu/řazení)
             stalled: false,
             speed_kmh: 0.0,
+            engine_c: 90.0, // startuje na provozní teplotě
         }
     }
 }
+
+// Asistenti řidiče (přepínatelné za jízdy: B = ABS, N = TC). Default zapnuté.
+#[derive(Resource)]
+pub struct DriverAids {
+    pub abs: bool, // anti-lock: uvolní brzdu při zamykání kola
+    pub tc: bool,  // traction control: stáhne moment při protáčení
+}
+impl Default for DriverAids {
+    fn default() -> Self {
+        Self { abs: true, tc: true }
+    }
+}
+// ABS: pod tuhle (zápornou) κ je kolo znatelně pomalejší než vozovka = zamyká se.
+pub const ABS_SLIP: f32 = 0.15;
+pub const ABS_CUT: f32 = 0.2; // na kolik stáhnout brzdu při zámku (pulzuje přes práh)
 
 // Poslední přidaný beam = pružina zavěšení: tlumič (COIL_DAMP_MULT) + dorazy zdvihu
 // (gumový doraz při stlačení, odskokový popruh při natažení).
@@ -659,6 +676,7 @@ pub fn spawn_solver_car(
             steered,
             tire: TIRE_DEFAULT,
             telem: WheelTelem::default(),
+            thermal: WheelThermal::default(),
         });
     }
 
@@ -1019,6 +1037,7 @@ pub fn spawn_softbody(
             steered: front, // přední = řízená (A4 to případně doladí)
             tire: TIRE_DEFAULT,
             telem: WheelTelem::default(),
+            thermal: WheelThermal::default(),
         });
     }
 
@@ -1135,13 +1154,23 @@ pub fn vehicle_drive(
     time: Res<Time>,
     loadout: Res<Loadout>,
     test: Res<TestDrive>,
+    ambient: Res<crate::thermal::Ambient>,
     mut state: ResMut<DrivetrainState>,
     mut sb: ResMut<SoftBody>,
+    mut aids: ResMut<DriverAids>,
 ) {
     // Testovací jízda (tlačítko TEST) drží plný plyn — hands-free měření 0–100.
     let throttle = if test.0 || keys.pressed(KeyCode::KeyW) { 1.0 } else { 0.0 };
     let braking = keys.pressed(KeyCode::KeyS);
     let parking = keys.pressed(KeyCode::Space); // ruční brzda — jen zadní náprava
+    if keys.just_pressed(KeyCode::KeyB) {
+        aids.abs = !aids.abs;
+        info!("ABS: {}", if aids.abs { "ON" } else { "OFF" });
+    }
+    if keys.just_pressed(KeyCode::KeyN) {
+        aids.tc = !aids.tc;
+        info!("TC: {}", if aids.tc { "ON" } else { "OFF" });
+    }
 
     // Spojka: levý Shift drží rozpojeno, puštění plynule sepne (skokové sepnutí = škubnutí).
     let clutch_target = if keys.pressed(KeyCode::ShiftLeft) { 0.0 } else { 1.0 };
@@ -1190,7 +1219,7 @@ pub fn vehicle_drive(
         (0.0, 0.0) // chcíplý motor nedává nic, jen tření a spojka
     } else {
         (
-            engine_torque(state.rpm, &loadout.engine) * throttle,
+            engine_torque(state.rpm, &loadout.engine) * throttle * crate::thermal::engine_power_factor(state.engine_c),
             IDLE_GAIN * (idle_omega - omega_e).max(0.0),
         )
     };
@@ -1205,6 +1234,13 @@ pub fn vehicle_drive(
         state.stalled = true; // zátěž stáhla otáčky pod práh → chcíplo (start: Shift+R)
     }
     state.rpm = omega_new * 60.0 / std::f32::consts::TAU;
+
+    // Teplota motoru: zátěž (rpm_frac × plyn) hřeje, radiátor chladí (∝ rychlost). Přehřátí
+    // (dlouhá zátěž bez airflow) sráží výkon výš přes engine_power_factor. Cooler part = časem.
+    let load = (state.rpm / loadout.engine.max_rpm.max(1.0)) * throttle;
+    let v_ms = state.speed_kmh / 3.6;
+    state.engine_c =
+        crate::thermal::engine_step(state.engine_c, !state.stalled, load, v_ms, ambient.0, time.delta_secs());
 
     // Na kola jde moment SPOJKY (ne motoru) × převod — co spojka nepřenese, neexistuje.
     let total = t_clutch * total_ratio;
@@ -1225,7 +1261,7 @@ pub fn vehicle_drive(
         // tancuje bokem a nerozjede se. Ustálí se kousek za špičkou (κ ~0.45).
         // ponytail: TC natvrdo bez vypínače; vypínač až s modelem spojky.
         let slip = (wheel.spin_vel.abs() * wheel.radius - v).max(0.0) / v.max(V_LOW);
-        if slip > 0.3 {
+        if aids.tc && slip > 0.3 {
             wheel.drive_torque *= 0.3 / slip;
         }
         // Brzdný moment per náprava z dílu Brakes; ručka přičítá jen na zadní.
@@ -1234,6 +1270,14 @@ pub fn vehicle_drive(
         } else {
             0.0
         } + if parking && !wheel.front { loadout.brakes.parking } else { 0.0 };
+        // Fade: horké brzdy dávají míň momentu (crate::thermal). Násobí celý moment
+        // včetně ručky — přehřátá brzda slábne bez ohledu na zdroj sešlápnutí.
+        wheel.brake *= crate::thermal::brake_fade(wheel.thermal.brake_c);
+        // ABS: kolo se zamyká (κ hodně záporná = pomalejší než vozovka) → uvolni brzdu,
+        // ať se roztočí zpět. Pulzuje přes práh (Update-rate) = ABS regulace.
+        if aids.abs && wheel.brake > 0.0 && wheel.telem.slip_ratio < -ABS_SLIP {
+            wheel.brake *= ABS_CUT;
+        }
     }
 }
 

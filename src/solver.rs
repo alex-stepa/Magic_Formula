@@ -80,6 +80,7 @@ pub struct WheelC {
     pub steered: bool,     // natáčí se s ním?
     pub tire: TireParams,  // model pneumatiky — izolovaná data, ať jde vyměnit za Pacejku
     pub telem: WheelTelem, // poslední hodnoty kontaktu (jen čtení pro HUD/log, solver je píše)
+    pub thermal: WheelThermal, // teploty brzdy/pneu (°C) — integruje crate::thermal::wheel_thermal
 }
 
 // Telemetrie kola za poslední substep — pro HUD a CSV log při ladění gripu.
@@ -91,6 +92,24 @@ pub struct WheelTelem {
     pub slip_angle: f32,  // boční skluz α (rad)
     pub f_long: f32,      // podélná síla pneumatiky (N)
     pub f_lat: f32,       // boční síla pneumatiky (N)
+}
+
+// Termální stav kola (°C) — persistentní, integruje se jednou za snímek v
+// crate::thermal::wheel_thermal. Solver čte tire_c pro grip vrstvu (peak multiplikátor),
+// vehicle_drive čte brake_c pro fade. Cold-start: obojí startuje na okolní teplotě.
+#[derive(Clone, Copy)]
+pub struct WheelThermal {
+    pub brake_c: f32,     // teplota brzdy
+    pub tire_surf_c: f32, // teplota povrchu pneu (contact patch) — krmí grip
+    pub tire_core_c: f32, // teplota kostry pneu — pomalá tepelná setrvačnost
+    pub wear: f32,        // opotřebení 0=nová .. 1=ojetá (≥1 praskne)
+    pub burst: bool,      // pneu praskla (flat) — grip spadne, drží do respawnu
+}
+impl Default for WheelThermal {
+    fn default() -> Self {
+        let a = crate::thermal::T_AMBIENT;
+        Self { brake_c: a, tire_surf_c: a, tire_core_c: a, wear: 0.0, burst: false }
+    }
 }
 
 // Koeficienty Magic Formula (Pacejka) pro jednu osu (podélnou nebo boční).
@@ -149,6 +168,82 @@ pub const DAMPING_RATIO: f32 = 0.25;
 // Max stlačení pneumatiky (metry) — pak „ráfek": tvrdá projekce nad terén. Boční stěna
 // 175/65R14 má ~11 cm, plné sražení už je náraz do ráfku; ~70 % je realistický strop.
 pub const TIRE_MAX_SQUASH: f32 = 0.08;
+
+// Analytické překážky (hitboxy). Auto = vlastní solver, ne rapier, tak kolize řešíme jak zem:
+// nody se vytlačí ze static tvaru + zabije se rychlost dovnitř. Zatím jen AABB (zeď na náraz).
+// ponytail: O(nody×collidery) na substep; při hodně překážkách přidat mřížku.
+#[derive(Clone, Copy)]
+pub enum Collider {
+    Box { min: Vec3, max: Vec3 },
+    // Svislý válec (barel/sloupek/strom): střed x/z, poloměr, výškový rozsah y0..y1.
+    Cylinder { x: f32, z: f32, r: f32, y0: f32, y1: f32 },
+}
+
+#[derive(Resource, Default)]
+pub struct WorldColliders(pub Vec<Collider>);
+
+// Náraz do překážky — rychlost dovnitř (m/s), kterou kolize zabila. Audio z toho dělá crash.
+#[derive(Event)]
+pub struct CrashImpact(pub f32);
+
+// Pod touhle rychlostí nárazu se crash event neposílá (drhnutí o zeď, ne rána).
+const CRASH_MIN: f32 = 1.5;
+
+// Vytlač nod z AABB (rozšířené o poloměr nodu) přes nejbližší stěnu + zabij rychlost dovnitř.
+// Vrací velikost zabité složky dovnitř (m/s) = síla nárazu (0 = mimo / žádný).
+fn resolve_box(min: Vec3, max: Vec3, r: f32, p: &mut Vec3, v: &mut Vec3) -> f32 {
+    let (lo, hi) = (min - Vec3::splat(r), max + Vec3::splat(r));
+    if p.x < lo.x || p.x > hi.x || p.y < lo.y || p.y > hi.y || p.z < lo.z || p.z > hi.z {
+        return 0.0; // mimo rozšířený kvádr
+    }
+    // Uvnitř: najdi nejmenší proniknutí přes 6 stěn (osa nejlevnějšího úniku).
+    let pen = [
+        (p.x - lo.x, Vec3::NEG_X),
+        (hi.x - p.x, Vec3::X),
+        (p.y - lo.y, Vec3::NEG_Y),
+        (hi.y - p.y, Vec3::Y),
+        (p.z - lo.z, Vec3::NEG_Z),
+        (hi.z - p.z, Vec3::Z),
+    ];
+    let (mut md, mut mn) = (f32::MAX, Vec3::Y);
+    for (d, n) in pen {
+        if d < md {
+            md = d;
+            mn = n;
+        }
+    }
+    *p += mn * md; // vytlač na nejbližší stěnu
+    let vn = v.dot(mn);
+    if vn < 0.0 {
+        *v -= vn * mn; // nepružná: složka dovnitř pryč
+        return -vn; // vn záporná (dovnitř) → kladná síla nárazu
+    }
+    0.0
+}
+
+// Vytlač nod ze svislého válce (horizontálně) + zabij rychlost dovnitř. Vrací sílu nárazu.
+fn resolve_cyl(x: f32, z: f32, r: f32, y0: f32, y1: f32, node_r: f32, p: &mut Vec3, v: &mut Vec3) -> f32 {
+    if p.y < y0 - node_r || p.y > y1 + node_r {
+        return 0.0; // mimo výškový rozsah válce
+    }
+    let (dx, dz) = (p.x - x, p.z - z);
+    let rr = r + node_r;
+    let d2 = dx * dx + dz * dz;
+    if d2 >= rr * rr || d2 < 1e-8 {
+        return 0.0; // mimo poloměr (nebo přesně ve středu → bez směru)
+    }
+    let d = d2.sqrt();
+    let (nx, nz) = (dx / d, dz / d);
+    p.x = x + nx * rr;
+    p.z = z + nz * rr;
+    let vn = v.x * nx + v.z * nz;
+    if vn < 0.0 {
+        v.x -= vn * nx;
+        v.z -= vn * nz;
+        return -vn;
+    }
+    0.0
+}
 
 // --- DRIVETRAIN ---
 // Part-shaped (připraveno na build systém): DÍLY jsou datové structy, RESOURCE drží,
@@ -222,6 +317,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn box_pushes_node_out_and_kills_inward_vel() {
+        let (min, max) = (Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.0, 1.0));
+        let r = 0.04;
+        // Nod uvnitř u +z stěny, míří dovnitř (−z) = náraz.
+        let mut p = Vec3::new(0.0, 1.0, 0.9);
+        let mut v = Vec3::new(0.0, 0.0, -1.0);
+        resolve_box(min, max, r, &mut p, &mut v);
+        assert!((p.z - (max.z + r)).abs() < 1e-4, "p.z={}", p.z); // vytlačen na +z stěnu
+        assert!(v.z.abs() < 1e-4, "v.z={}", v.z); // složka dovnitř zabita
+        // Nod venku = beze změny.
+        let mut p2 = Vec3::new(0.0, 5.0, 0.0);
+        let mut v2 = Vec3::new(0.0, -1.0, 0.0);
+        resolve_box(min, max, r, &mut p2, &mut v2);
+        assert_eq!(p2, Vec3::new(0.0, 5.0, 0.0));
+        assert_eq!(v2, Vec3::new(0.0, -1.0, 0.0));
+    }
+
+    #[test]
+    fn cyl_pushes_node_out_horizontally() {
+        let r = 0.04;
+        // Nod uvnitř válce (r=1) u +x, míří dovnitř (−x).
+        let mut p = Vec3::new(0.9, 0.6, 0.0);
+        let mut v = Vec3::new(-1.0, 0.0, 0.0);
+        let imp = resolve_cyl(0.0, 0.0, 1.0, 0.0, 1.2, r, &mut p, &mut v);
+        assert!((p.x - (1.0 + r)).abs() < 1e-4, "p.x={}", p.x); // vytlačen na plášť
+        assert!(v.x.abs() < 1e-4, "v.x={}", v.x); // dovnitř zabito
+        assert!((imp - 1.0).abs() < 1e-4, "imp={imp}"); // síla nárazu = 1 m/s
+        // Nad válcem (mimo y) = beze změny.
+        let mut p2 = Vec3::new(0.0, 5.0, 0.0);
+        let mut v2 = Vec3::new(1.0, 0.0, 0.0);
+        assert_eq!(resolve_cyl(0.0, 0.0, 1.0, 0.0, 1.2, r, &mut p2, &mut v2), 0.0);
+        assert_eq!(p2, Vec3::new(0.0, 5.0, 0.0));
+    }
+
+    #[test]
     fn bump_stop_engages_outside_travel() {
         let b = BeamC { i: 0, j: 1, rest: 0.5, k: 20_000.0, d: 0.0, d_rebound: 0.0, min: 0.44, max: 0.56, stop_k: 200_000.0 };
         let close = |a: f32, b: f32| (a - b).abs() < 0.1; // floaty: tolerance 0.1 N
@@ -247,7 +377,7 @@ pub fn magic_formula(x: f32, p: Pacejka, d: f32) -> f32 {
 // --- SOLVER: semi-implicitní Euler se substeppingem (běží ve FixedUpdate, 64 Hz) ---
 // Jeden snímek rozdělíme na `sb.substeps` malých kroků (adaptivně, viz compute_substeps),
 // aby tuhé beamy zůstaly stabilní (CFL: dt < 2/ω). Reálné tuhosti, žádné škálování.
-pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Time<Fixed>>, terrain: Res<Terrain>) {
+pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Time<Fixed>>, terrain: Res<Terrain>, colliders: Res<WorldColliders>, mut crash_ev: EventWriter<CrashImpact>) {
     if sb.beams.is_empty() {
         return; // nic nespawnuto
     }
@@ -261,6 +391,8 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Tim
     // Přepočítáme faktor tak, aby výsledek za SNÍMEK byl stejný (~0.7) bez ohledu na substepy.
     let tang_keep = 0.7_f32.powf(1.0 / sb.substeps as f32);
     let (front_lock, rear_lock) = (loadout.front_diff.lock, loadout.rear_diff.lock); // diff osy
+
+    let mut crash_peak = 0.0f32; // nejsilnější náraz do překážky za snímek
 
     for _ in 0..sb.substeps {
         // 1) vynuluj síly a přidej gravitaci (jen pohyblivým nodům)
@@ -308,7 +440,17 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Tim
             let nd = sb.wheels[wi].tire.normal_damping;
             let long = sb.wheels[wi].tire.long;
             let lat = sb.wheels[wi].tire.lat;
-            let friction = sb.wheels[wi].tire.friction;
+            // Grip vrstva: teplotní multiplikátor peaku (VRSTVA nad Pacejkou). Násobí
+            // `friction`, které dál krmí špičku křivky (d) I strop kruhu adheze (fmax) →
+            // konzistentní. V provozním okně ×1.00 = původní ladění beze změny.
+            let friction =
+                sb.wheels[wi].tire.friction
+                    * crate::thermal::grip_mult(sb.wheels[wi].thermal.tire_surf_c)
+                    * if sb.wheels[wi].thermal.burst {
+                        crate::thermal::BURST_GRIP
+                    } else {
+                        crate::thermal::wear_grip(sb.wheels[wi].thermal.wear)
+                    };
             let steer = sb.wheels[wi].steer;
             let m_wheel = 1.0 / sb.inv_mass[hub];
             let i_wheel = 0.5 * m_wheel * radius * radius; // moment setrvačnosti disku
@@ -435,6 +577,20 @@ pub fn softbody_solve(sb: ResMut<SoftBody>, loadout: Res<Loadout>, time: Res<Tim
                 let vn = sb.vel[i].dot(n);
                 sb.vel[i] = n * vn + (sb.vel[i] - n * vn) * tang_keep;
             }
+
+            // Překážky (hitboxy): vytlač nod z každého collideru; sleduj nejsilnější náraz.
+            for c in &colliders.0 {
+                let imp = match c {
+                    Collider::Box { min, max } => resolve_box(*min, *max, node_r, &mut sb.pos[i], &mut sb.vel[i]),
+                    Collider::Cylinder { x, z, r, y0, y1 } => resolve_cyl(*x, *z, *r, *y0, *y1, node_r, &mut sb.pos[i], &mut sb.vel[i]),
+                };
+                crash_peak = crash_peak.max(imp);
+            }
         }
+    }
+
+    // Jeden crash event za snímek s nejsilnějším nárazem (nad prahem). Audio si udělá zvuk.
+    if crash_peak > CRASH_MIN {
+        crash_ev.send(CrashImpact(crash_peak));
     }
 }
