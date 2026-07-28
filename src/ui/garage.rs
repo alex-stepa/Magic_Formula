@@ -898,9 +898,10 @@ fn update_specs(
     }
 }
 
-// Delta na kartách: co díl změní proti aktuálnímu buildu. Poctivě jen tam, kde umíme
-// spočítat KPI — motor (výkon + 0–100) a převodovka (0–100). Zavěšení/brzdy mění handling,
-// který zatím neměříme → bez čísel (až test-loop 4.2). Zelená = rychlejší, amber = pomalejší.
+// Delta na kartách: co díl změní proti aktuálnímu buildu. Motor/převodovka = měřené KPI
+// (výkon + 0–100). Pneu/chladič = PŘÍMÁ charakteristika dílu (grip/opotřebení/chlazení) proti
+// osazenému. Zavěšení mění handling, který zatím neměříme → bez čísel (až test-loop 4.2).
+// Zelená = lepší, amber = horší/kompromis, prázdné = beze změny (nebo osazený díl).
 fn update_part_deltas(
     loadout: Res<Loadout>,
     bm: Res<BuildMass>,
@@ -916,6 +917,8 @@ fn update_part_deltas(
                 let t = estimate_0_100_s(&loadout.engine, g, loadout.layout, bm.mass, 0.34, 1.0, bm.front);
                 delta_line(cur_t, t, cur_p, cur_p)
             }
+            crate::parts::PartData::Tire(t) => tire_delta(&loadout.compound, t),
+            crate::parts::PartData::Cooler(cl) => cooler_delta(&loadout.cooler, cl),
             _ => (String::new(), TEXT_MUTED),
         };
         if text.0 != s {
@@ -924,6 +927,66 @@ fn update_part_deltas(
         if color.0 != c {
             color.0 = c;
         }
+    }
+}
+
+// Barvy delta (sdílené s delta_line): zelená = lepší, amber = horší/kompromis.
+const DELTA_GREEN: Color = Color::srgb(0.475, 0.788, 0.627);
+const DELTA_AMBER: Color = Color::srgb(0.878, 0.659, 0.4);
+
+// Pneu kompound: grip a opotřebení proti osazenému (přímo z dat, ne měřeno). Grip řídí barvu
+// (víc gripu = zelená), opotřebení je jen info (měkká drží líp, ale sjede dřív = kompromis).
+fn tire_delta(cur: &crate::vehicle::Compound, new: &crate::vehicle::Compound) -> (String, Color) {
+    let mut parts: Vec<String> = Vec::new();
+    let dg = (new.grip / cur.grip - 1.0) * 100.0;
+    if dg.abs() >= 0.5 {
+        parts.push(format!("grip {}{:.0} %", if dg > 0.0 { "+" } else { "−" }, dg.abs()));
+    }
+    let dw = (new.wear_rate / cur.wear_rate - 1.0) * 100.0;
+    if dw.abs() >= 1.0 {
+        parts.push(format!("opotř. {}{:.0} %", if dw > 0.0 { "+" } else { "−" }, dw.abs()));
+    }
+    if parts.is_empty() {
+        return (String::new(), TEXT_MUTED);
+    }
+    let color = if dg > 0.5 { DELTA_GREEN } else { DELTA_AMBER };
+    (parts.join(" · "), color)
+}
+
+// Chladič: kapacita odvodu tepla (h0 + h1·v při ~20 m/s) proti osazenému. Víc = zelená.
+fn cooler_delta(cur: &crate::vehicle::Cooler, new: &crate::vehicle::Cooler) -> (String, Color) {
+    let cap = |c: &crate::vehicle::Cooler| c.h0 + c.h1 * 20.0;
+    let dc = (cap(new) / cap(cur) - 1.0) * 100.0;
+    if dc.abs() < 1.0 {
+        return (String::new(), TEXT_MUTED);
+    }
+    let color = if dc > 0.0 { DELTA_GREEN } else { DELTA_AMBER };
+    (format!("chlazení {}{:.0} %", if dc > 0.0 { "+" } else { "−" }, dc.abs()), color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vehicle::{Compound, Cooler};
+
+    #[test]
+    fn tire_cooler_deltas() {
+        // stejný díl = prázdné (osazený)
+        assert!(tire_delta(&Compound::default(), &Compound::default()).0.is_empty());
+        assert!(cooler_delta(&Cooler::default(), &Cooler::default()).0.is_empty());
+        // měkčí pneu: víc grip (zelená) + rychlejší opotřebení
+        let soft = Compound { grip: 1.05, wear_rate: 3.0e-7, ..Compound::default() };
+        let (s, c) = tire_delta(&Compound::default(), &soft);
+        assert!(s.contains("grip +5") && s.contains("opotř. +50"), "{s}");
+        assert_eq!(c, DELTA_GREEN);
+        // tvrdší pneu: míň grip = amber
+        let hard = Compound { grip: 0.97, ..Compound::default() };
+        assert_eq!(tire_delta(&Compound::default(), &hard).1, DELTA_AMBER);
+        // lepší chladič = zelená, kladné %
+        let race = Cooler { h0: 110.0, h1: 50.0 };
+        let (s, c) = cooler_delta(&Cooler::default(), &race);
+        assert!(s.starts_with("chlazení +"), "{s}");
+        assert_eq!(c, DELTA_GREEN);
     }
 }
 
@@ -949,7 +1012,7 @@ fn delta_line(cur_t: Option<f32>, new_t: Option<f32>, cur_p: f32, new_p: f32) ->
     if parts.is_empty() {
         return (String::new(), TEXT_MUTED);
     }
-    let color = if faster > 0.0 { Color::srgb(0.475, 0.788, 0.627) } else { Color::srgb(0.878, 0.659, 0.4) };
+    let color = if faster > 0.0 { DELTA_GREEN } else { DELTA_AMBER };
     (parts.join(" · "), color)
 }
 
