@@ -648,9 +648,9 @@ pub fn spawn_solver_car(
     let hub_mass = chassis.hub_mass; // 4× (kolo+hub+brzda)
     let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
-    // Sdílená značka u ráfku — kontrastní kostička, ať je vidět otáčení kola.
-    let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
-    let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
+    // Ukazatel otáčení kola na ráfku — malý kovový nýtek (dřív křiklavě žlutá debug kostka).
+    let marker_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
+    let marker_material = materials.add(Color::srgb(0.62, 0.64, 0.68));
     // wx: kolo (r 0.34, šířka 0.22) se při plném rejdu 28° natočí ~0.26 m do stran —
     // rozchod 1.0 ho drží mimo kvádr těla (hx 0.7); širší rozchod = i menší kolébání.
     // wy: kola 0.30 pod středem těla → spodek těla ~28 cm nad zemí (s wy −0.15 škrtal
@@ -975,8 +975,9 @@ pub fn spawn_softbody(
     // Tytéž sousedy = úchyty zavěšení (build_suspension), takže hub na nich rovnou visí.
     let hub_mass = chassis.hub_mass;
     let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
-    let marker_mesh = meshes.add(Cuboid::new(0.08, 0.08, 0.08));
-    let marker_material = materials.add(Color::srgb(1.0, 0.9, 0.1));
+    // Ukazatel otáčení kola na ráfku — malý kovový nýtek (dřív křiklavě žlutá debug kostka).
+    let marker_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
+    let marker_material = materials.add(Color::srgb(0.62, 0.64, 0.68));
 
     // Sousedství přes beamy PODLE ID (axle nody v solveru nejsou, ale jejich beamy
     // v surových datech ano — právě přes ně se dojde k suspension nodům).
