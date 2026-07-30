@@ -3,5 +3,6 @@
   { "name": "McPHERSON", "note": "vzpěra do věže — realistická geometrie", "data": { "suspension": { "mcpherson": { "arm_k": 150000, "strut_k": 80000 } } } },
   { "name": "WISHBONE", "note": "SLA ramena — camber v propružení", "data": { "suspension": { "doublewishbone": { "arm_k": 150000, "spring_k": 100000 } } } },
   { "name": "TORSION BEAM", "note": "vlečná náprava (Fabia)", "data": { "suspension": { "torsionbeam": { "arm_k": 150000, "spring_k": 100000 } } } },
+  { "name": "LEAF SPRING", "note": "listová — tuhá (živá) náprava", "data": { "suspension": { "leafspring": { "arm_k": 150000, "spring_k": 100000 } } } },
   { "name": "RIGID", "note": "tuhé, bez zdvihu", "data": { "suspension": "rigid" } }
 ]

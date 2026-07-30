@@ -121,6 +121,7 @@ enum SliderKind {
     Cylinders,
     SuspSpring(bool), // bool = přední náprava
     SuspArm(bool),
+    WheelOffset(bool), // offset ráfku (m, + ven) — bool = přední náprava
     BrakeBias,  // podíl brzdné síly na přední osu (0..1)
     BrakePower, // celková brzdná síla (front+rear, Nm)
 }
@@ -134,6 +135,7 @@ impl SliderKind {
             SliderKind::Cylinders => (3.0, 12.0),
             SliderKind::SuspSpring(_) => (40_000.0, 250_000.0),
             SliderKind::SuspArm(_) => (80_000.0, 300_000.0),
+            SliderKind::WheelOffset(_) => (-0.04, 0.08), // −40 mm (užší) až +80 mm (širší)
             SliderKind::BrakeBias => (0.4, 0.8),
             SliderKind::BrakePower => (800.0, 3000.0),
         }
@@ -150,6 +152,7 @@ impl SliderKind {
             SliderKind::Cylinders => l.engine_spec.cylinders as f32,
             SliderKind::SuspSpring(f) => l.susp(f).spring(),
             SliderKind::SuspArm(f) => l.susp(f).arm(),
+            SliderKind::WheelOffset(f) => l.offset(f),
             SliderKind::BrakeBias => if total > 0.0 { l.brakes.front / total } else { 0.6 },
             SliderKind::BrakePower => total,
         }
@@ -162,6 +165,7 @@ impl SliderKind {
             SliderKind::Cylinders => l.engine_spec.cylinders = v.round() as u8,
             SliderKind::SuspSpring(f) => { let k = l.susp(f).with_spring(v); l.set_susp(f, k); }
             SliderKind::SuspArm(f) => { let k = l.susp(f).with_arm(v); l.set_susp(f, k); }
+            SliderKind::WheelOffset(f) => l.set_offset(f, v),
             // bias/power přerozdělí front/rear (parking beze změny)
             SliderKind::BrakeBias => {
                 let total = l.brakes.front + l.brakes.rear;
@@ -183,6 +187,7 @@ impl SliderKind {
             SliderKind::Boost => if v < 0.05 { "atmosf.".into() } else { format!("{v:.2} bar") },
             SliderKind::Cylinders => format!("{v:.0} válců"),
             SliderKind::SuspSpring(_) | SliderKind::SuspArm(_) => format!("{:.0} kN/m", v / 1000.0),
+            SliderKind::WheelOffset(_) => format!("{:+.0} mm", v * 1000.0),
             SliderKind::BrakeBias => format!("{:.0}/{:.0}", v * 100.0, (1.0 - v) * 100.0),
             SliderKind::BrakePower => format!("{v:.0} Nm"),
         }
@@ -403,6 +408,7 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                                 spawn_sliders(s, &fonts, &[
                                     (SliderKind::SuspSpring(front), "Tuhost pružiny"),
                                     (SliderKind::SuspArm(front), "Tuhost ramen"),
+                                    (SliderKind::WheelOffset(front), "Offset ráfku"),
                                 ]);
                             }
                         });

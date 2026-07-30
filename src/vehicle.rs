@@ -93,7 +93,11 @@ pub enum SuspensionKind {
     // (nezávislý), zadek: vlečná ramena + pružina + PŘÍČNÝ beam mezi zadními huby (twist
     // beam) = semi-independent + zabudovaný anti-roll (nahrazuje V-nod stabilizátor vzadu).
     TorsionBeam { arm_k: f32, spring_k: f32 },
-    // LeafSpring { ... } — časem
+    // Listová pružina = TUHÁ (živá) náprava: per-kolo stejná 3-beam topologie jako Coil,
+    // navíc TUHÝ příčný beam mezi huby (solid axle, tužší než twist beam) → obě kola
+    // silně spřažená (roll i zdvih se přenáší). Rozdíl proti TorsionBeam: ten je
+    // semi-independent (příčný beam = jen stabilizátor), tady je náprava skoro pevná.
+    LeafSpring { arm_k: f32, spring_k: f32 },
 }
 
 impl SuspensionKind {
@@ -107,6 +111,7 @@ impl SuspensionKind {
             Self::McPherson { .. } => "McPherson (vzpěra)",
             Self::DoubleWishbone { .. } => "Double wishbone (camber)",
             Self::TorsionBeam { .. } => "TorsionBeam (vlečná)",
+            Self::LeafSpring { .. } => "Leaf spring (tuhá)",
         }
     }
 
@@ -117,6 +122,7 @@ impl SuspensionKind {
             Self::McPherson { strut_k, .. } => strut_k,
             Self::DoubleWishbone { spring_k, .. } => spring_k,
             Self::TorsionBeam { spring_k, .. } => spring_k,
+            Self::LeafSpring { spring_k, .. } => spring_k,
             Self::Rigid => 0.0,
         }
     }
@@ -125,7 +131,8 @@ impl SuspensionKind {
             Self::Coil { arm_k, .. }
             | Self::McPherson { arm_k, .. }
             | Self::DoubleWishbone { arm_k, .. }
-            | Self::TorsionBeam { arm_k, .. } => arm_k,
+            | Self::TorsionBeam { arm_k, .. }
+            | Self::LeafSpring { arm_k, .. } => arm_k,
             Self::Rigid => 0.0,
         }
     }
@@ -135,6 +142,7 @@ impl SuspensionKind {
             Self::McPherson { arm_k, .. } => Self::McPherson { arm_k, strut_k: v },
             Self::DoubleWishbone { arm_k, .. } => Self::DoubleWishbone { arm_k, spring_k: v },
             Self::TorsionBeam { arm_k, .. } => Self::TorsionBeam { arm_k, spring_k: v },
+            Self::LeafSpring { arm_k, .. } => Self::LeafSpring { arm_k, spring_k: v },
             Self::Rigid => Self::Rigid,
         }
     }
@@ -144,6 +152,7 @@ impl SuspensionKind {
             Self::McPherson { strut_k, .. } => Self::McPherson { arm_k: v, strut_k },
             Self::DoubleWishbone { spring_k, .. } => Self::DoubleWishbone { arm_k: v, spring_k },
             Self::TorsionBeam { spring_k, .. } => Self::TorsionBeam { arm_k: v, spring_k },
+            Self::LeafSpring { spring_k, .. } => Self::LeafSpring { arm_k: v, spring_k },
             Self::Rigid => Self::Rigid,
         }
     }
@@ -178,6 +187,10 @@ pub struct Loadout {
     pub layout: DriveLayout,      // FWD/RWD/AWD (přepínatelné)
     pub front_diff: Differential, // diff přední osy
     pub rear_diff: Differential,  // diff zadní osy
+    // Offset ráfku per náprava (m, + = ven → širší rozchod). Posune hub-node (=kontaktní
+    // bod) ven/dovnitř; širší rozchod = větší rameno klopného momentu → míň přenosu váhy.
+    pub front_offset: f32,
+    pub rear_offset: f32,
 }
 
 impl Loadout {
@@ -188,6 +201,13 @@ impl Loadout {
     }
     pub fn set_susp(&mut self, front: bool, k: SuspensionKind) {
         if front { self.front_susp = k } else { self.rear_susp = k }
+    }
+    // Offset ráfku dané nápravy (m, + ven).
+    pub fn offset(&self, front: bool) -> f32 {
+        if front { self.front_offset } else { self.rear_offset }
+    }
+    pub fn set_offset(&mut self, front: bool, v: f32) {
+        if front { self.front_offset = v } else { self.rear_offset = v }
     }
 }
 
@@ -214,6 +234,8 @@ impl Default for Loadout {
             layout: DriveLayout::Rwd,               // start: zadní pohon
             front_diff: Differential { lock: 0.0 }, // start: otevřené
             rear_diff: Differential { lock: 0.0 },
+            front_offset: 0.0, // stock rozchod z .veh / test-car geometrie
+            rear_offset: 0.0,
         }
     }
 }
@@ -543,7 +565,8 @@ pub fn build_suspension(sb: &mut SoftBody, hub: usize, top: Option<usize>, ancho
         // McPherson-like) od zadku (horní roh, Coil-like) — viz spawn_solver_car.
         SuspensionKind::Coil { arm_k, coil_k }
         | SuspensionKind::McPherson { arm_k, strut_k: coil_k }
-        | SuspensionKind::TorsionBeam { arm_k, spring_k: coil_k } => {
+        | SuspensionKind::TorsionBeam { arm_k, spring_k: coil_k }
+        | SuspensionKind::LeafSpring { arm_k, spring_k: coil_k } => {
             sb.add_beam(hub, anchors[0], arm_k);
             sb.add_beam(hub, anchors[1], arm_k);
             sb.add_beam(hub, anchors[2], coil_k);
@@ -693,7 +716,8 @@ pub fn spawn_solver_car(
     ];
     for (sx, sz, steered) in wheel_layout {
         let front = sz > 0.0; // přední osa = +z
-        let hub_pos = origin + Vec3::new(sx * wx, wy, sz * wz);
+        // Offset ráfku té nápravy rozšíří/zúží rozchod (posun kontaktního bodu ven).
+        let hub_pos = origin + Vec3::new(sx * (wx + loadout.offset(front)), wy, sz * wz);
         // debug kulička v ose hubu (drží Transform hubu); samotné kolo = disk níž
         let hub_dbg = commands
             .spawn((
@@ -817,8 +841,14 @@ pub fn spawn_solver_car(
     ] {
         match kind {
             SuspensionKind::Rigid => {}
+            // TorsionBeam = příčný beam jako stabilizátor (semi-independent).
             SuspensionKind::TorsionBeam { spring_k, .. } => {
                 sb.add_beam(hl, hr, spring_k * 2.0);
+            }
+            // LeafSpring = TUHÁ náprava: příčný beam ~2× tužší než twist beam → kola
+            // skoro pevně spřažená (solid axle). ponytail: spring_k*4 jako heuristika, dolaď.
+            SuspensionKind::LeafSpring { spring_k, .. } => {
+                sb.add_beam(hl, hr, spring_k * 4.0);
             }
             _ => build_antiroll(commands, sb, &node_mesh, &node_material, hl, hr, ll, lr),
         }
@@ -1078,8 +1108,10 @@ pub fn spawn_softbody(
         // na skutečný půlrozchod z .veh (center.x); 0.80 = fallback pro starý .veh bez něj.
         // Rest-length beamů zavěšení (build_suspension níž) tuhle polohu zafixuje,
         // i když anchory zůstanou inboard.
-        hub_pos.x = hub_pos.x.signum() * if half_track > 0.0 { half_track } else { 0.80 };
-        let front = hub_pos.z > mean_z; // přední osa = +z (přední kola Fabie vyšla na +z)
+        let front = hub_pos.z > mean_z; // přední osa = +z (nezávislé na x → spočti dřív)
+        // Půlrozchod z .veh (nebo fallback) + offset ráfku té nápravy (širší/užší rozchod).
+        let base_half = if half_track > 0.0 { half_track } else { 0.80 };
+        hub_pos.x = hub_pos.x.signum() * (base_half + loadout.offset(front)); (přední kola Fabie vyšla na +z)
         let render = commands
             .spawn((
                 Mesh3d(meshes.add(Cylinder::new(radius, width))),
@@ -1212,6 +1244,11 @@ pub fn spawn_softbody(
             // — zabudovaný anti-roll vlečné nápravy.
             if let SuspensionKind::TorsionBeam { spring_k, .. } = kind {
                 sb.add_beam(hl, hr, spring_k * 2.0);
+                continue;
+            }
+            // LeafSpring = tuhá náprava: příčný beam ~2× tužší (solid axle).
+            if let SuspensionKind::LeafSpring { spring_k, .. } = kind {
+                sb.add_beam(hl, hr, spring_k * 4.0);
                 continue;
             }
             let (Some(ll), Some(lr)) = (

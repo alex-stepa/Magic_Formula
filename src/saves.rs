@@ -22,6 +22,10 @@ pub struct SavedBuild {
     pub layout: DriveLayout,
     pub front_lock: f32,
     pub rear_lock: f32,
+    #[serde(default)]
+    pub front_offset: f32,
+    #[serde(default)]
+    pub rear_offset: f32,
 }
 
 impl SavedBuild {
@@ -37,6 +41,8 @@ impl SavedBuild {
             layout: l.layout,
             front_lock: l.front_diff.lock,
             rear_lock: l.rear_diff.lock,
+            front_offset: l.front_offset,
+            rear_offset: l.rear_offset,
         }
     }
     // Namontuj uložený build do výbavy (motor se přegeneruje z spec).
@@ -51,6 +57,8 @@ impl SavedBuild {
         l.layout = self.layout;
         l.front_diff = Differential { lock: self.front_lock };
         l.rear_diff = Differential { lock: self.rear_lock };
+        l.front_offset = self.front_offset;
+        l.rear_offset = self.rear_offset;
     }
     // Automatický popisný název: objem + plnění + zavěšení (např. "1.4L NA · Coil").
     pub fn auto_name(l: &Loadout) -> String {
@@ -61,6 +69,7 @@ impl SavedBuild {
             SuspensionKind::McPherson { .. } => "McP",
             SuspensionKind::DoubleWishbone { .. } => "SLA",
             SuspensionKind::TorsionBeam { .. } => "TB",
+            SuspensionKind::LeafSpring { .. } => "Leaf",
         };
         // Stejné vpředu i vzadu → jeden kód; jinak "předek/zadek".
         let susp = if l.front_susp.same_variant(l.rear_susp) {
