@@ -3,6 +3,7 @@
 // skrytý nad vším (z-index 100), přepíná se přes SettingsUi resource. SOUND tab drží
 // hlasitosti (AudioSettings). MAIN/VIDEO zatím placeholdery.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
@@ -11,6 +12,7 @@ use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
 use serde::{Deserialize, Serialize};
 
 use crate::audio::AudioSettings;
+use crate::keybinds::{Action, Key, KeyBindings};
 use crate::ui::*;
 
 const SETTINGS_PATH: &str = "player/settings.json";
@@ -30,6 +32,8 @@ struct PersistedSettings {
     fullscreen: bool,
     msaa: u8,
     fps_limit: u32,
+    #[serde(default)]
+    bindings: HashMap<Action, Key>,
 }
 
 // Default pro crash u starších settings.json bez tohoto pole.
@@ -41,6 +45,7 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<SettingsUi>()
         .init_resource::<VideoSettings>()
         .init_resource::<FpsCap>()
+        .init_resource::<RebindCapture>()
         .add_systems(Startup, (load_settings, spawn_settings))
         .add_systems(
             Update,
@@ -59,6 +64,9 @@ pub fn plugin(app: &mut App) {
                 fps_slider_drag,
                 update_fps_widgets,
                 limit_fps,
+                rebind_click,
+                rebind_capture,
+                sync_rebind_labels,
             ),
         );
 }
@@ -90,6 +98,15 @@ struct SettingsTabBtn(SettingsTab);
 struct SettingsPanel(SettingsTab);
 #[derive(Component)]
 struct SettingsClose;
+
+// Rebind: klik na klávesovou krabičku → RebindCapture čeká na další stisk (viz
+// rebind_capture). Esc zruší capture beze změny (Esc je systémová klávesa, nejde přebindit).
+#[derive(Resource, Default)]
+struct RebindCapture(Option<Action>);
+#[derive(Component, Clone, Copy)]
+struct RebindBtn(Action);
+#[derive(Component, Clone, Copy)]
+struct RebindLabel(Action);
 
 // Hlasitost: +/− tlačítko a % popisek pro daný cíl.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -240,7 +257,8 @@ fn spawn_settings(mut commands: Commands, fonts: Res<UiFonts>) {
                     });
 
                     // ── obsah tabů (jen aktivní má Display::Flex) ──
-                    // OBECNÉ — přehled ovládání (dva sloupce). Klávesy dle kódu (vehicle/main).
+                    // OBECNÉ — ovládání. Rebindovatelné akce (klik na krabičku → stiskni
+                    // klávesu) + pár natvrdo (Esc/Backspace/1–5 — systémové/dev, viz keybinds.rs).
                     card.spawn((
                         Node {
                             min_height: Val::Px(120.0),
@@ -252,38 +270,17 @@ fn spawn_settings(mut commands: Commands, fonts: Res<UiFonts>) {
                         SettingsPanel(SettingsTab::Main),
                     ))
                     .with_children(|panel| {
-                        let cols: [&[(&str, &str)]; 2] = [
-                            &[
-                                ("W", "Plyn"),
-                                ("S", "Brzda / zpátečka"),
-                                ("A / D", "Řízení"),
-                                ("Shift", "Spojka"),
-                                ("E", "Řadit nahoru"),
-                                ("Q", "Řadit dolů"),
-                                ("R", "Nastartovat"),
-                            ],
-                            &[
-                                ("L", "Uzamknout diff"),
-                                ("K", "Rozvod pohonu"),
-                                ("C", "Kamera"),
-                                ("T", "Telemetrie"),
-                                ("Esc", "Pauza"),
-                                ("Backspace", "Smazat auta"),
-                                ("1–5", "Spawn buildů"),
-                            ],
-                        ];
-                        for rows in cols {
+                        let (left, right) = Action::ALL.split_at(7);
+                        for actions in [left, right] {
                             panel
-                                .spawn(Node {
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: Val::Px(7.0),
-                                    ..default()
-                                })
+                                .spawn(Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(7.0), ..default() })
                                 .with_children(|col| {
-                                    for (key, desc) in rows {
+                                    for &action in actions {
                                         col.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(10.0), ..default() })
                                             .with_children(|row| {
                                                 row.spawn((
+                                                    Button,
+                                                    RebindBtn(action),
                                                     Node {
                                                         width: Val::Px(84.0),
                                                         padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
@@ -295,13 +292,38 @@ fn spawn_settings(mut commands: Commands, fonts: Res<UiFonts>) {
                                                     BackgroundColor(Color::srgba(0.949, 0.949, 0.953, 0.05)),
                                                 ))
                                                 .with_children(|k| {
-                                                    k.spawn(txt(*key, &fonts.mono, 13.0, ACCENT_300));
+                                                    k.spawn((txt("...", &fonts.mono, 13.0, ACCENT_300), RebindLabel(action)));
                                                 });
-                                                row.spawn(txt(*desc, &fonts.body, 13.0, TEXT));
+                                                row.spawn(txt(action.label(), &fonts.body, 13.0, TEXT));
                                             });
                                     }
                                 });
                         }
+                        // natvrdo — systémové/dev klávesy, nejdou přebindit
+                        panel
+                            .spawn(Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(7.0), ..default() })
+                            .with_children(|col| {
+                                for (key, desc) in [("Esc", "Pauza"), ("Backspace", "Smazat auta"), ("1–5", "Spawn buildů")] {
+                                    col.spawn(Node { align_items: AlignItems::Center, column_gap: Val::Px(10.0), ..default() })
+                                        .with_children(|row| {
+                                            row.spawn((
+                                                Node {
+                                                    width: Val::Px(84.0),
+                                                    padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                                                    justify_content: JustifyContent::Center,
+                                                    border: UiRect::all(Val::Px(1.0)),
+                                                    ..default()
+                                                },
+                                                BorderColor(Color::srgba(0.949, 0.949, 0.953, 0.25)),
+                                                BackgroundColor(Color::srgba(0.949, 0.949, 0.953, 0.05)),
+                                            ))
+                                            .with_children(|k| {
+                                                k.spawn(txt(key, &fonts.mono, 13.0, ACCENT_300));
+                                            });
+                                            row.spawn(txt(desc, &fonts.body, 13.0, TEXT));
+                                        });
+                                }
+                            });
                     });
 
                     // OBRAZ — runtime grafická nastavení (klik = cyklus hodnoty)
@@ -641,8 +663,51 @@ fn limit_fps(cap: Res<FpsCap>, mut last: Local<Option<Instant>>) {
     *last = Some(Instant::now());
 }
 
+// Klik na krabičku → čekej na další stisk (rebind_capture). Znovuklik na jinou krabičku
+// = přepni cíl (bez potvrzení té předchozí).
+fn rebind_click(interactions: Query<(&Interaction, &RebindBtn), Changed<Interaction>>, mut capture: ResMut<RebindCapture>) {
+    for (interaction, btn) in &interactions {
+        if *interaction == Interaction::Pressed {
+            capture.0 = Some(btn.0);
+        }
+    }
+}
+
+// Zachytí první přijatelnou klávesu (Key::from_keycode) po kliku na krabičku a přebinduje.
+// Esc capture zruší beze změny (Esc je systémová, do Key enum záměrně nepatří).
+fn rebind_capture(keys: Res<ButtonInput<KeyCode>>, mut capture: ResMut<RebindCapture>, mut bindings: ResMut<KeyBindings>) {
+    let Some(action) = capture.0 else { return };
+    if keys.just_pressed(KeyCode::Escape) {
+        capture.0 = None;
+        return;
+    }
+    if let Some(k) = keys.get_just_pressed().find_map(|kc| Key::from_keycode(*kc)) {
+        bindings.rebind(action, k);
+        capture.0 = None;
+    }
+}
+
+// Popisek krabičky: aktuální klávesa, nebo „..." dokud čeká na stisk. Rámeček zvýrazní
+// akci, co se právě přebindovává.
+fn sync_rebind_labels(
+    bindings: Res<KeyBindings>,
+    capture: Res<RebindCapture>,
+    mut labels: Query<(&RebindLabel, &mut Text)>,
+    mut btns: Query<(&RebindBtn, &mut BorderColor)>,
+) {
+    for (RebindLabel(action), mut text) in &mut labels {
+        let s = if capture.0 == Some(*action) { "...".to_string() } else { bindings.key(*action).label().to_string() };
+        if text.0 != s {
+            text.0 = s;
+        }
+    }
+    for (RebindBtn(action), mut border) in &mut btns {
+        *border = BorderColor(if capture.0 == Some(*action) { ACCENT } else { Color::srgba(0.949, 0.949, 0.953, 0.25) });
+    }
+}
+
 // Načti settings z disku do resources (Startup). Chybějící/vadný soubor = necháme defaulty.
-fn load_settings(mut audio: ResMut<AudioSettings>, mut video: ResMut<VideoSettings>, mut fps: ResMut<FpsCap>) {
+fn load_settings(mut audio: ResMut<AudioSettings>, mut video: ResMut<VideoSettings>, mut fps: ResMut<FpsCap>, mut bindings: ResMut<KeyBindings>) {
     let Ok(s) = std::fs::read_to_string(SETTINGS_PATH) else { return };
     let Ok(p) = serde_json::from_str::<PersistedSettings>(&s) else { return };
     audio.master = p.master;
@@ -654,12 +719,15 @@ fn load_settings(mut audio: ResMut<AudioSettings>, mut video: ResMut<VideoSettin
     video.fullscreen = p.fullscreen;
     video.msaa = p.msaa;
     fps.limit = p.fps_limit;
+    if !p.bindings.is_empty() {
+        *bindings = KeyBindings::from_map(p.bindings);
+    }
 }
 
 // Zapiš settings při každé změně (is_changed je true jen ve snímku změny — žádné trvalé psaní).
 // První snímek se zapíšou (loaded/default) → vznikne soubor. Levné.
-fn save_settings(audio: Res<AudioSettings>, video: Res<VideoSettings>, fps: Res<FpsCap>) {
-    if !(audio.is_changed() || video.is_changed() || fps.is_changed()) {
+fn save_settings(audio: Res<AudioSettings>, video: Res<VideoSettings>, fps: Res<FpsCap>, bindings: Res<KeyBindings>) {
+    if !(audio.is_changed() || video.is_changed() || fps.is_changed() || bindings.is_changed()) {
         return;
     }
     let p = PersistedSettings {
@@ -672,6 +740,7 @@ fn save_settings(audio: Res<AudioSettings>, video: Res<VideoSettings>, fps: Res<
         fullscreen: video.fullscreen,
         msaa: video.msaa,
         fps_limit: fps.limit,
+        bindings: bindings.as_map().clone(),
     };
     let _ = std::fs::create_dir_all("player");
     if let Ok(json) = serde_json::to_string_pretty(&p) {

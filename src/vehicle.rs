@@ -1111,7 +1111,7 @@ pub fn spawn_softbody(
         let front = hub_pos.z > mean_z; // přední osa = +z (nezávislé na x → spočti dřív)
         // Půlrozchod z .veh (nebo fallback) + offset ráfku té nápravy (širší/užší rozchod).
         let base_half = if half_track > 0.0 { half_track } else { 0.80 };
-        hub_pos.x = hub_pos.x.signum() * (base_half + loadout.offset(front)); (přední kola Fabie vyšla na +z)
+        hub_pos.x = hub_pos.x.signum() * (base_half + loadout.offset(front)); // (přední kola Fabie vyšla na +z)
         let render = commands
             .spawn((
                 Mesh3d(meshes.add(Cylinder::new(radius, width))),
@@ -1348,6 +1348,7 @@ pub fn engine_torque(rpm: f32, engine: &Engine) -> f32 {
 // Nepočítá fyziku — jen zapíše ZÁMĚR (moment na kola) z motoru přes převody; sílu řeší solver.
 pub fn vehicle_drive(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<crate::keybinds::KeyBindings>,
     time: Res<Time>,
     loadout: Res<Loadout>,
     test: Res<TestDrive>,
@@ -1357,10 +1358,11 @@ pub fn vehicle_drive(
     mut aids: ResMut<DriverAids>,
     mut fuel: ResMut<FuelState>,
 ) {
+    use crate::keybinds::Action;
     // Testovací jízda (tlačítko TEST) drží plný plyn — hands-free měření 0–100.
-    let throttle = if test.0 || keys.pressed(KeyCode::KeyW) { 1.0 } else { 0.0 };
-    let braking = keys.pressed(KeyCode::KeyS);
-    let parking = keys.pressed(KeyCode::Space); // ruční brzda — jen zadní náprava
+    let throttle = if test.0 || bindings.pressed(&keys, Action::Throttle) { 1.0 } else { 0.0 };
+    let braking = bindings.pressed(&keys, Action::Brake);
+    let parking = bindings.pressed(&keys, Action::Handbrake); // ruční brzda — jen zadní náprava
     if keys.just_pressed(KeyCode::KeyB) {
         aids.abs = !aids.abs;
         info!("ABS: {}", if aids.abs { "ON" } else { "OFF" });
@@ -1371,13 +1373,13 @@ pub fn vehicle_drive(
     }
 
     // Spojka: levý Shift drží rozpojeno, puštění plynule sepne (skokové sepnutí = škubnutí).
-    let clutch_target = if keys.pressed(KeyCode::ShiftLeft) { 0.0 } else { 1.0 };
+    let clutch_target = if bindings.pressed(&keys, Action::Clutch) { 0.0 } else { 1.0 };
     let clutch_rate = 4.0 * time.delta_secs();
     state.clutch += (clutch_target - state.clutch).clamp(-clutch_rate, clutch_rate);
 
     // Starter: R nahodí chcíplý motor na volnoběh. MUSÍ být před čtením omega_e —
     // jinak integrace níž jede ze starých otáček a motor hned zase chcípne.
-    if state.stalled && keys.just_pressed(KeyCode::KeyR) {
+    if state.stalled && bindings.just_pressed(&keys, Action::Start) {
         state.stalled = false;
         state.rpm = loadout.engine.idle_rpm;
     }
@@ -1510,12 +1512,13 @@ pub fn vehicle_drive(
 // Řízení: A/D natáčí přední kola kolem svislé osy. Plynule lerpne k cíli (ne skokem),
 // ať řízení nešvihne. Solver z `wheel.steer` odvodí směr pneumatiky (sekce 2.6).
 // Feel (úhel dle rychlosti, Ackermann, samovracení) až s volantem/ovladačem.
-pub fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut sb: ResMut<SoftBody>) {
+pub fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, bindings: Res<crate::keybinds::KeyBindings>, time: Res<Time>, mut sb: ResMut<SoftBody>) {
+    use crate::keybinds::Action;
     let max_angle = 0.5; // ~28°
     let mut target = 0.0;
-    if keys.pressed(KeyCode::KeyA) {
+    if bindings.pressed(&keys, Action::SteerLeft) {
         target = max_angle; // doleva
-    } else if keys.pressed(KeyCode::KeyD) {
+    } else if bindings.pressed(&keys, Action::SteerRight) {
         target = -max_angle; // doprava
     }
     let rate = 4.0 * time.delta_secs(); // max přírůstek úhlu za snímek
@@ -1529,24 +1532,25 @@ pub fn vehicle_steer(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut sb: R
 
 // Ovládání drivetrainu: E/Q = řazení, L = zámek diffu, K = přepnout pohon (FWD/RWD/AWD).
 // Počet kvaltů bere z namontované převodovky (díl), ne z konstanty.
-pub fn shift_gears(keys: Res<ButtonInput<KeyCode>>, mut loadout: ResMut<Loadout>, mut state: ResMut<DrivetrainState>) {
+pub fn shift_gears(keys: Res<ButtonInput<KeyCode>>, bindings: Res<crate::keybinds::KeyBindings>, mut loadout: ResMut<Loadout>, mut state: ResMut<DrivetrainState>) {
+    use crate::keybinds::Action;
     let top = loadout.gearbox.ratios.len() as i32;
     // Kvalt jde zařadit jen s rozpojenou spojkou (drž levý Shift) — jako ve skutečném autě.
     let clutch_free = state.clutch < 0.5;
-    if keys.just_pressed(KeyCode::KeyE) && clutch_free {
+    if bindings.just_pressed(&keys, Action::ShiftUp) && clutch_free {
         state.gear = (state.gear + 1).min(top); // nahoru, max nejvyšší kvalt
     }
-    if keys.just_pressed(KeyCode::KeyQ) && clutch_free {
+    if bindings.just_pressed(&keys, Action::ShiftDown) && clutch_free {
         state.gear = (state.gear - 1).max(-1); // dolů, min zpátečka
     }
-    // L = uzamykatelný diff: přepne lock obou os mezi 0 (otevřený) a 1 (uzamčený).
-    if keys.just_pressed(KeyCode::KeyL) {
+    // diff lock: přepne lock obou os mezi 0 (otevřený) a 1 (uzamčený).
+    if bindings.just_pressed(&keys, Action::DiffLock) {
         let new = if loadout.rear_diff.lock > 0.5 { 0.0 } else { 1.0 };
         loadout.front_diff.lock = new;
         loadout.rear_diff.lock = new;
     }
-    // K = přepnout rozvod pohonu RWD → FWD → AWD(50:50) → …
-    if keys.just_pressed(KeyCode::KeyK) {
+    // přepnout rozvod pohonu RWD → FWD → AWD(50:50) → …
+    if bindings.just_pressed(&keys, Action::DriveLayout) {
         loadout.layout = match loadout.layout {
             DriveLayout::Rwd => DriveLayout::Fwd,
             DriveLayout::Fwd => DriveLayout::Awd { front: 0.5 },

@@ -19,6 +19,7 @@ mod ui; // obrazovky: title / garáž / HUD + pauza (stavový automat)
 mod audio; // procedurální zvuk motoru (reaguje na rpm/válce/config)
 mod thermal; // termální model brzd/pneu (teploty → fade + grip okno)
 mod effects; // vizuální efekty pneu (skid marks + kouř)
+mod keybinds; // přemapovatelné ovládání (Action → klávesa, defaulty = dnešní natvrdo)
 
 use solver::*;
 use vehicle::*;
@@ -56,6 +57,7 @@ fn main() {
         .add_plugins(ui::UiPlugin)
         .add_plugins(audio::EngineSoundPlugin)
         .add_plugins(effects::TireFxPlugin)
+        .add_plugins(keybinds::plugin)
         .add_systems(Startup, setup)
         // Plná nádrž při každém vjezdu do hry (garáž → jízda). ponytail: respawn klávesou 1
         // uprostřed jízdy nádrž neresetuje — okrajové, netřeba.
@@ -419,6 +421,7 @@ struct Telemetry {
 
 fn telemetry_log(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<keybinds::KeyBindings>,
     time: Res<Time>,
     sb: Res<SoftBody>,
     state: Res<DrivetrainState>,
@@ -426,7 +429,7 @@ fn telemetry_log(
     mut tel: ResMut<Telemetry>,
 ) {
     use std::io::Write;
-    if keys.just_pressed(KeyCode::KeyT) {
+    if bindings.just_pressed(&keys, keybinds::Action::Telemetry) {
         if tel.writer.is_some() {
             tel.writer = None; // Drop = flush + zavření souboru
             info!("Telemetrie: záznam zastaven");
@@ -472,11 +475,12 @@ fn telemetry_log(
 // `fpv` je Local<bool> — drží si ho systém sám mezi snímky (žádný extra resource netřeba).
 fn camera_control(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<keybinds::KeyBindings>,
     sb: Res<SoftBody>,
     mut fpv: Local<bool>,
     mut camera: Query<(&mut Transform, &mut Projection), With<Camera3d>>,
 ) {
-    if keys.just_pressed(KeyCode::KeyC) {
+    if bindings.just_pressed(&keys, keybinds::Action::Camera) {
         *fpv = !*fpv; // překlop mód
         // FPV širší záběr (periferie jako v kokpitu), chase zpět na default 45°.
         if let Ok((_, mut proj)) = camera.get_single_mut() {

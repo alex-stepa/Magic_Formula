@@ -589,10 +589,11 @@ fn esc_pause(keys: Res<ButtonInput<KeyCode>>, mut paused: ResMut<Paused>, settin
 // pod pauzou log neběží, tak panel netoggluj, ať se stavy nerozjedou).
 fn toggle_telemetry_panel(
     keys: Res<ButtonInput<KeyCode>>,
+    bindings: Res<crate::keybinds::KeyBindings>,
     paused: Res<Paused>,
     mut panel: Query<&mut Node, With<TelemetryPanel>>,
 ) {
-    if paused.0 || !keys.just_pressed(KeyCode::KeyT) {
+    if paused.0 || !bindings.just_pressed(&keys, crate::keybinds::Action::Telemetry) {
         return;
     }
     for mut node in &mut panel {
