@@ -2,6 +2,9 @@
 // + živá spec tabulka. Díl = data — garáž jen píše do Loadout,
 // auto se postaví při Vyjet (respawn_car).
 
+use bevy::ecs::system::SystemParam;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
 use crate::parts::{PartCatalog, PartCategory, PartData};
@@ -14,10 +17,17 @@ pub fn plugin(app: &mut App) {
         .init_resource::<BuildMass>()
         .init_resource::<SavedBuilds>()
         .init_resource::<BuildsDirty>()
+        .init_resource::<BuildNameInput>()
+        .init_resource::<NameInputFocused>()
+        .init_resource::<HoveredSusp>()
         .add_systems(OnEnter(AppState::Garage), spawn_garage)
         .add_systems(
             Update,
-            (garage_clicks, sync_selection, sync_tabs, drag_sliders, sync_sliders, refresh_build_list, (update_specs, update_part_deltas).chain(), garage_scroll)
+            (
+                garage_clicks, sync_selection, sync_tabs, drag_sliders, sync_sliders,
+                refresh_build_list, track_susp_hover, edit_build_name, sync_build_name_field,
+                (update_specs, update_part_deltas).chain(), garage_scroll,
+            )
                 .run_if(in_state(AppState::Garage)),
         );
 }
@@ -63,6 +73,9 @@ enum GarageAction {
     SaveBuild,
     LoadBuild(usize),   // index do SavedBuilds
     DeleteBuild(usize),
+    ExportBuild(usize), // index do SavedBuilds → export/<jméno>.json
+    ImportBuilds,        // načte export/*.json do player/builds
+    FocusNameInput,       // klik do pole jména → aktivuje psaní
 }
 
 // Uložené buildy hráče (načtené z player/builds) + příznak přenačtení.
@@ -70,6 +83,29 @@ enum GarageAction {
 struct SavedBuilds(Vec<crate::saves::SavedBuild>);
 #[derive(Resource, Default)]
 struct BuildsDirty(bool);
+
+// Rozepsané jméno buildu (pole nad tlačítkem Uložit) + jestli se do něj právě píše.
+#[derive(Resource, Default)]
+struct BuildNameInput(String);
+#[derive(Resource, Default)]
+struct NameInputFocused(bool);
+#[derive(Component)]
+struct BuildNameField;
+
+// Kterou kartu zavěšení hráč aktuálně hoveruje (idx katalogu, přední náprava?) —
+// spec tabulka podle toho ukáže náhled řádku „Zavěšení".
+#[derive(Resource, Default)]
+struct HoveredSusp(Option<(usize, bool)>);
+
+// Uložené buildy + pole jména svázané do jednoho SystemParamu — garage_clicks má už tak
+// dost parametrů (Bevy limit 16 na systém), tohle je čtvrtina co dřív bralo 4 sloty.
+#[derive(SystemParam)]
+struct SavesUi<'w> {
+    builds: Res<'w, SavedBuilds>,
+    dirty: ResMut<'w, BuildsDirty>,
+    name_input: ResMut<'w, BuildNameInput>,
+    focused: ResMut<'w, NameInputFocused>,
+}
 
 // Kontejner seznamu uložených buildů (děti se přestavují při změně).
 #[derive(Component)]
@@ -636,17 +672,39 @@ fn spawn_garage(mut commands: Commands, fonts: Res<UiFonts>, catalog: Res<PartCa
                         });
 
                     // ── ULOŽENÉ BUILDY (player data) ──
-                    r.spawn(Node { justify_content: JustifyContent::SpaceBetween, align_items: AlignItems::Center, margin: UiRect::vertical(Val::Px(10.0)).with_top(Val::Px(24.0)), ..default() })
-                        .with_children(|h| {
-                            h.spawn(txt("ULOŽENÉ BUILDY", &fonts.heading, 14.0, ACCENT_300));
-                            h.spawn((
+                    r.spawn((
+                        txt("ULOŽENÉ BUILDY", &fonts.heading, 14.0, ACCENT_300),
+                        Node { margin: UiRect::vertical(Val::Px(6.0)).with_top(Val::Px(24.0)), ..default() },
+                    ));
+                    // Jméno buildu — klikni a piš, Enter/„+ ULOŽIT" uloží. Prázdné = auto-název.
+                    r.spawn((
+                        Button,
+                        GarageAction::FocusNameInput,
+                        Node { padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)), border: UiRect::all(Val::Px(1.0)), margin: UiRect::bottom(Val::Px(6.0)), ..default() },
+                        BorderColor(DIVIDER),
+                    ))
+                    .with_children(|f| {
+                        f.spawn((txt("název buildu…", &fonts.body, 13.0, TEXT_MUTED), BuildNameField));
+                    });
+                    r.spawn(Node { column_gap: Val::Px(8.0), margin: UiRect::bottom(Val::Px(10.0)), ..default() })
+                        .with_children(|row| {
+                            row.spawn((
                                 Button,
                                 GarageAction::SaveBuild,
-                                Node { padding: UiRect::axes(Val::Px(12.0), Val::Px(5.0)), border: UiRect::all(Val::Px(1.0)), ..default() },
+                                Node { flex_grow: 1.0, justify_content: JustifyContent::Center, padding: UiRect::axes(Val::Px(12.0), Val::Px(5.0)), border: UiRect::all(Val::Px(1.0)), ..default() },
                                 BorderColor(ACCENT),
                             ))
                             .with_children(|b| {
                                 b.spawn(txt("+ ULOŽIT", &fonts.body, 12.0, ACCENT_300));
+                            });
+                            row.spawn((
+                                Button,
+                                GarageAction::ImportBuilds,
+                                Node { padding: UiRect::axes(Val::Px(12.0), Val::Px(5.0)), border: UiRect::all(Val::Px(1.0)), ..default() },
+                                BorderColor(DIVIDER),
+                            ))
+                            .with_children(|b| {
+                                b.spawn(txt("IMPORT", &fonts.body, 12.0, TEXT));
                             });
                         });
                     r.spawn((Node { flex_direction: FlexDirection::Column, row_gap: Val::Px(6.0), ..default() }, BuildList));
@@ -668,8 +726,7 @@ fn garage_clicks(
     chassis: Res<crate::vehicle::ChassisParams>,
     catalog: Res<PartCatalog>,
     mut active: ResMut<ActiveTab>,
-    builds: Res<SavedBuilds>,
-    mut dirty: ResMut<BuildsDirty>,
+    mut saves_ui: SavesUi,
     mut test: ResMut<crate::vehicle::TestDrive>,
     terrain: Res<Terrain>,
     mut next: ResMut<NextState<AppState>>,
@@ -677,6 +734,9 @@ fn garage_clicks(
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
+        }
+        if !matches!(action, GarageAction::FocusNameInput) {
+            saves_ui.focused.0 = false; // klik mimo pole jména = konec psaní
         }
         match *action {
             GarageAction::Back => next.set(AppState::Title),
@@ -704,26 +764,50 @@ fn garage_clicks(
                 loadout.engine_spec.config = cfg;
                 loadout.engine = loadout.engine_spec.build();
             }
-            GarageAction::SaveBuild => {
-                let b = crate::saves::SavedBuild::from_loadout(&loadout, crate::saves::SavedBuild::auto_name(&loadout));
-                if let Err(e) = crate::saves::save(&b) {
-                    warn!("uložení buildu selhalo: {e}");
-                }
-                dirty.0 = true;
-            }
+            GarageAction::SaveBuild => save_current_build(&loadout, &mut saves_ui),
             GarageAction::LoadBuild(i) => {
-                if let Some(b) = builds.0.get(i) {
+                if let Some(b) = saves_ui.builds.0.get(i) {
                     b.apply(&mut loadout);
                 }
             }
             GarageAction::DeleteBuild(i) => {
-                if let Some(b) = builds.0.get(i) {
+                if let Some(b) = saves_ui.builds.0.get(i) {
                     crate::saves::delete(&b.name);
-                    dirty.0 = true;
+                    saves_ui.dirty.0 = true;
                 }
             }
+            GarageAction::ExportBuild(i) => {
+                if let Some(b) = saves_ui.builds.0.get(i) {
+                    if let Err(e) = crate::saves::export(b) {
+                        warn!("export buildu selhal: {e}");
+                    }
+                }
+            }
+            GarageAction::ImportBuilds => {
+                let n = crate::saves::import_all();
+                info!("import: {n} buildů z export/");
+                saves_ui.dirty.0 = true;
+            }
+            GarageAction::FocusNameInput => saves_ui.focused.0 = true,
         }
     }
+}
+
+// Uloží aktuální build pod jménem z BuildNameInput (prázdné → auto_name), pak pole vyčistí.
+// Sdílené mezi kliknutím na „+ ULOŽIT" a Enterem v poli jména.
+fn save_current_build(loadout: &Loadout, saves_ui: &mut SavesUi) {
+    let name = if saves_ui.name_input.0.trim().is_empty() {
+        crate::saves::SavedBuild::auto_name(loadout)
+    } else {
+        saves_ui.name_input.0.trim().to_string()
+    };
+    let b = crate::saves::SavedBuild::from_loadout(loadout, name);
+    if let Err(e) = crate::saves::save(&b) {
+        warn!("uložení buildu selhalo: {e}");
+    }
+    saves_ui.name_input.0.clear();
+    saves_ui.focused.0 = false;
+    saves_ui.dirty.0 = true;
 }
 
 // Přenačte seznam uložených buildů z disku a přestaví UI (při dirty). despawn+respawn
@@ -760,6 +844,15 @@ fn refresh_build_list(
                     });
                     row.spawn((
                         Button,
+                        GarageAction::ExportBuild(i),
+                        Node { padding: UiRect::axes(Val::Px(9.0), Val::Px(7.0)), border: UiRect::all(Val::Px(1.0)), ..default() },
+                        BorderColor(DIVIDER),
+                    ))
+                    .with_children(|x| {
+                        x.spawn(txt("↓", &fonts.body, 13.0, TEXT_MUTED));
+                    });
+                    row.spawn((
+                        Button,
                         GarageAction::DeleteBuild(i),
                         Node { padding: UiRect::axes(Val::Px(9.0), Val::Px(7.0)), border: UiRect::all(Val::Px(1.0)), ..default() },
                         BorderColor(DIVIDER),
@@ -770,6 +863,72 @@ fn refresh_build_list(
                 });
         }
     });
+}
+
+// Hover nad kartou zavěšení → HoveredSusp (idx katalogu, přední náprava). Jen jedna karta
+// může být hoverovaná najednou (myš je jeden kurzor), takže first-match stačí.
+fn track_susp_hover(
+    q: Query<(&Interaction, &GarageAction)>,
+    mut hovered: ResMut<HoveredSusp>,
+) {
+    let hit = q.iter().find_map(|(i, a)| match (i, a) {
+        (Interaction::Hovered, GarageAction::SuspPart { idx, front }) => Some((*idx, *front)),
+        _ => None,
+    });
+    if hovered.0 != hit {
+        hovered.0 = hit;
+    }
+}
+
+// Psaní do pole jména buildu — aktivní jen když je pole fokusnuté (klik). Enter = uložit
+// (o samotné uložení se postará SaveBuild akce, tady jen naplní GarageAction::SaveBuild klik).
+fn edit_build_name(
+    loadout: Res<Loadout>,
+    mut saves_ui: SavesUi,
+    mut keys: EventReader<KeyboardInput>,
+) {
+    if !saves_ui.focused.0 {
+        keys.clear();
+        return;
+    }
+    for ev in keys.read() {
+        if ev.state != ButtonState::Pressed {
+            continue;
+        }
+        match &ev.logical_key {
+            Key::Character(s) => saves_ui.name_input.0.push_str(s),
+            Key::Space => saves_ui.name_input.0.push(' '),
+            Key::Backspace => { saves_ui.name_input.0.pop(); }
+            Key::Enter => save_current_build(&loadout, &mut saves_ui),
+            _ => {}
+        }
+    }
+}
+
+// Zobrazí rozepsané jméno v poli (nebo placeholder, když je prázdné) + zvýrazní rámeček
+// při psaní.
+fn sync_build_name_field(
+    name_input: Res<BuildNameInput>,
+    focused: Res<NameInputFocused>,
+    mut field: Query<(&mut Text, &mut TextColor), With<BuildNameField>>,
+    mut border: Query<(&GarageAction, &mut BorderColor), With<Button>>,
+) {
+    if let Ok((mut text, mut color)) = field.get_single_mut() {
+        let empty = name_input.0.is_empty();
+        let s = if empty { "název buildu…".to_string() } else { name_input.0.clone() };
+        if text.0 != s {
+            text.0 = s;
+        }
+        let c = if empty { TEXT_MUTED } else { TEXT };
+        if color.0 != c {
+            color.0 = c;
+        }
+    }
+    for (action, mut b) in &mut border {
+        if matches!(action, GarageAction::FocusNameInput) {
+            *b = BorderColor(if focused.0 { ACCENT } else { DIVIDER });
+        }
+    }
 }
 
 // Zvýraznění vybraných dílů/auta/tabu. Běží každý snímek (pár entit).
@@ -861,9 +1020,11 @@ fn sync_tabs(active: Res<ActiveTab>, mut sections: Query<(&TabContent, &mut Node
 fn update_specs(
     loadout: Res<Loadout>,
     chassis: Res<crate::vehicle::ChassisParams>,
+    catalog: Res<PartCatalog>,
+    hovered: Res<HoveredSusp>,
     mut build_mass: ResMut<BuildMass>,
     mut cache: Local<Option<(usize, [String; 4], String, f32, f32)>>, // (i, counts, cap, mass, front)
-    mut values: Query<(&SpecValue, &mut Text), (Without<CarCaption>, Without<KpiValue>, Without<PartDelta>)>,
+    mut values: Query<(&SpecValue, &mut Text, &mut TextColor), (Without<CarCaption>, Without<KpiValue>, Without<PartDelta>)>,
     mut kpis: Query<(&KpiValue, &mut Text), (Without<CarCaption>, Without<SpecValue>, Without<PartDelta>)>,
     mut caption: Query<&mut Text, With<CarCaption>>,
 ) {
@@ -910,9 +1071,25 @@ fn update_specs(
         &counts[0], &counts[1], &counts[2], &counts[3],
         &susp_label, loadout.layout.label(), diff,
     ];
-    for (SpecValue(i), mut text) in &mut values {
-        if text.0 != rows[*i] {
-            text.0 = rows[*i].to_string();
+    // Hover nad kartou zavěšení → náhled řádku „Zavěšení" (jen když se liší od aktuálu).
+    let hover_susp = hovered.0.and_then(|(idx, front)| match &catalog.0[idx].data {
+        PartData::Suspension(k) if !loadout.susp(front).same_variant(*k) => {
+            let new_front = if front { k.label() } else { loadout.front_susp.label() };
+            let new_rear = if front { loadout.rear_susp.label() } else { k.label() };
+            Some(if new_front == new_rear { new_front.to_string() } else { format!("{new_front} / {new_rear}") })
+        }
+        _ => None,
+    });
+    for (SpecValue(i), mut text, mut color) in &mut values {
+        let (s, c) = match (*i, &hover_susp) {
+            (4, Some(h)) => (h.clone(), ACCENT_300),
+            _ => (rows[*i].to_string(), TEXT),
+        };
+        if text.0 != s {
+            text.0 = s;
+        }
+        if color.0 != c {
+            color.0 = c;
         }
     }
     if let Ok(mut text) = caption.get_single_mut() {

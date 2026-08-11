@@ -105,6 +105,30 @@ pub fn delete(name: &str) {
     let _ = std::fs::remove_file(dir().join(format!("{}.json", file_stem(name))));
 }
 
+fn export_dir() -> PathBuf {
+    PathBuf::from("export")
+}
+
+// Export mimo player/builds — do export/<jméno>.json, sdílitelné/kopírovatelné ručně.
+pub fn export(b: &SavedBuild) -> std::io::Result<()> {
+    std::fs::create_dir_all(export_dir())?;
+    let path = export_dir().join(format!("{}.json", file_stem(&b.name)));
+    std::fs::write(path, serde_json::to_string_pretty(b).unwrap())
+}
+
+// Načte všechny buildy z export/ a uloží je do player/builds (import). Vrací počet.
+pub fn import_all() -> usize {
+    std::fs::read_dir(export_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|s| serde_json::from_str::<SavedBuild>(&s).ok())
+        .filter(|b| save(b).is_ok())
+        .count()
+}
+
 // Načte všechny uložené buildy (seřazené podle jména). Chybný soubor přeskočí.
 pub fn list() -> Vec<SavedBuild> {
     let mut builds: Vec<SavedBuild> = std::fs::read_dir(dir())
