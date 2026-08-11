@@ -1,9 +1,18 @@
 target/
 *.zip
 *.hgt
+.DS_Store
+.idea/
+__pycache__/
 
 # telemetrie z ladění (per-jízda CSV)
 telemetry/
 
 # uložené buildy hráče (player data)
 player/
+
+# claude code lokální stav (settings.local.json, worktrees)
+.claude/
+
+# graphify analýza (vygenerovaný výstup)
+graphify-out/

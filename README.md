@@ -197,9 +197,6 @@ src/
 
 ### NOT yet
 - ❌ Per-axle tire balance tuning (both axles same Pacejka now)
-- ❌ Tire temps, wear, temperature dynamics
-- ❌ Brake temps (jbeam brake thermals data ready: brakeDiameter/brakeMass/vented-disc —
-  teplota → fade/grip brzd, časem)
 - ❌ Real OSM location, rally checkpoints, multiplayer
 
 ---
@@ -215,11 +212,12 @@ src/
 - **E) Telemetry + Grip tuning** — ✅ per-wheel contact CSV log (T key),
   Pacejka lateral `b` tuned from real test data (8→18), vehicle feel tested on
   skidpad + test track (rovinka). Auto is drivable and repeatable.
-- **Tire model** — Pacejka procedural, good enough. Future: tire temps (teplota → grip),
-  per-axle balance, wear simulation.
-- **`.veh` integration** — ✅ complete: suspension (Coil/McP/DW from garage), wheels
-  from jbeam, beam precompression (springs hold static load), bump stops, rebound
-  damping, per-axle brakes from jbeam. Future: brake temps (jbeam thermals data).
+- **Tire model** — ✅ Pacejka procedural + thermal layer (temp → grip, wear) done.
+  Future: per-axle balance tuning.
+- **`.veh` integration** — ✅ complete: suspension (Coil/McP/DW/TorsionBeam/LeafSpring
+  from garage), wheels from jbeam, beam precompression (springs hold static load),
+  bump stops, rebound damping, per-axle brakes from jbeam, brake thermals (fade/grip
+  from temperature).
 
 ### Phase 2.5 — UI/UX (design hotový — `Game magic formula UI.zip`, klikací prototyp)
 Struktura obrazovek podle návrhu:
@@ -239,11 +237,15 @@ Struktura obrazovek podle návrhu:
 ### Phase 3 — World
 - OSM data loader, road mesh from OSM ways, one real location (SRTM elevation already in).
 
-### Phase 4 — Build system ← **NEXT** (then game-defining polish: settings, music,
-sounds, better visuals, controls; Phase 3 world after)
-- Part inventory, assembly UI (My Summer Car style), compatibility, tuning (Automation style)
-- The first piece is already alive: `CarBuild` resource + suspension choice in the menu
-  (pattern: part = data, resource holds the choice, builder reads — same as `Drivetrain`)
+### Phase 4 — Build system ← **IN PROGRESS** (4.0/4.1a/4.1b/4.2 done, 4.1c polish
+ongoing; then game-defining polish: settings, controls; Phase 3 world after)
+- ✅ JSON part catalog (`assets/parts/*.json`), garage tabs, `CarBuild`/`Loadout`
+  pattern (part = data, resource holds the choice, builder reads), delta numbers on
+  part cards, thermal model (brake/tire/cooler parts), engine sound (granular synth
+  via cpal)
+- **4.1c (current)**: hover delta in the spec table, named saved builds + JSON
+  export/import (`src/saves.rs` backend already there)
+- **4.3 (blocked)**: hardpoints — waiting on a second real `.jbeam` mod to test against
 
 ### Phase 5 — Game modes
 - Freeroam, rally checkpoints + timer, ghost replay

@@ -78,20 +78,16 @@ cargo check           # quick check that it compiles
 
 ## Current phase
 
-**Phase 2 — Physics.** Done: custom node-beam solver (replaced rapier soft-body),
-unified car model on the solver, tire model (Pacejka longitudinal and lateral, friction
-circle, spin dynamics), chase/FPV camera, **A)** the `.veh` car drives, **C)** drivetrain
-(engine + gearbox + diff/AWD), **B part 1)** `Coil` suspension with travel on the test car
-(2 stiff ~horizontal arms + a ~vertical spring with a damper — geometry trick, solver
-untouched), anti-roll bar as a V-node, launch traction control, build menu (`CarBuild`:
-Rigid/Coil/McPherson/DoubleWishbone — McPherson = strut onto a tower above the hub;
-DW = knuckle (top node) + SLA arms → real camber, the disk tilts along hub→top),
-clutch (left Shift; engine = integrated state, viscous coupling with capacity,
-Clear on Backspace), **D)** terrain (`World` trait — solver queries height/normal,
-Fz along the surface normal, slip in the tangent plane; `Hills` procedural, flat
-zone around spawn).
-**BEING TUNED:** tire model values (Pacejka `b/c/e`, `MU`, grip, `V_LOW`).
+**Phase 4 — Build system, in progress.** Phase 2 (physics), Phase 2.5 (UI/UX) done
+long ago. Since then: thermal model (brake/tire/cooler parts — temp → fade/grip/wear),
+engine sound (granular synth via cpal), garage build system 4.0/4.1a/4.1b/4.2 done
+(JSON part catalog, tabs, `CarBuild`/`Loadout` pattern, suspension kinds Rigid/Coil/
+McPherson/DoubleWishbone/TorsionBeam/LeafSpring, delta numbers on part cards).
 
-Next (in order): **B continuation)** suspension for `.veh` cars (still `Rigid`
-+ placeholder ride height) → **C')** `.veh parts`
-(wheel radius/mass from data). Tire model tuning ongoing.
+**Now (4.1c, polish):** hover delta in the garage spec table; named saved builds +
+JSON export/import (`src/saves.rs` backend exists — `SavedBuild`/`save`/`load`/`list`,
+garage UI wiring still needed).
+
+**Blocked (4.3):** hardpoints — waiting on a second real `.jbeam` mod to test against.
+
+Full details: see [README.md](README.md) roadmap.
