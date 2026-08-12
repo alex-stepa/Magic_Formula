@@ -697,10 +697,20 @@ pub fn spawn_solver_car(
     let wheel_width = 0.22;
     let hub_mass = chassis.hub_mass; // 4× (kolo+hub+brzda)
     let wheel_mesh = meshes.add(Cylinder::new(wheel_radius, wheel_width));
-    let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
+    // Pneumatika: matná guma (metallic 0, roughness vysoký).
+    let wheel_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.05, 0.05),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
     // Ukazatel otáčení kola na ráfku — malý kovový nýtek (dřív křiklavě žlutá debug kostka).
     let marker_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
-    let marker_material = materials.add(Color::srgb(0.62, 0.64, 0.68));
+    let marker_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.62, 0.64, 0.68),
+        metallic: 0.8,
+        perceptual_roughness: 0.3,
+        ..default()
+    });
     // wx: kolo (r 0.34, šířka 0.22) se při plném rejdu 28° natočí ~0.26 m do stran —
     // rozchod 1.0 ho drží mimo kvádr těla (hx 0.7); širší rozchod = i menší kolébání.
     // wy: kola 0.30 pod středem těla → spodek těla ~28 cm nad zemí (s wy −0.15 škrtal
@@ -855,9 +865,15 @@ pub fn spawn_solver_car(
     }
 
     // Viditelný trup: kvádr velikosti rámu. Transform mu přepisuje softbody_to_transforms.
+    // Lak: nízký roughness = lesk, mírný metallic = clearcoat look (ne čistý kov).
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(2.0 * hx, 2.0 * hy, 2.0 * hz))),
-        MeshMaterial3d(materials.add(Color::srgb(0.6, 0.6, 0.7))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.6, 0.6, 0.7),
+            metallic: 0.2,
+            perceptual_roughness: 0.35,
+            ..default()
+        })),
         Transform::from_translation(origin),
         CarBody,
         Spawned,
@@ -1045,10 +1061,20 @@ pub fn spawn_softbody(
     // dostaneme z jejich beam-SOUSEDŮ (= suspension nody fh*/rh*…), co globální pozice mají.
     // Tytéž sousedy = úchyty zavěšení (build_suspension), takže hub na nich rovnou visí.
     let hub_mass = chassis.hub_mass;
-    let wheel_material = materials.add(Color::srgb(0.05, 0.05, 0.05));
+    // Pneumatika: matná guma (metallic 0, roughness vysoký).
+    let wheel_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.05, 0.05),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
     // Ukazatel otáčení kola na ráfku — malý kovový nýtek (dřív křiklavě žlutá debug kostka).
     let marker_mesh = meshes.add(Cuboid::new(0.05, 0.05, 0.05));
-    let marker_material = materials.add(Color::srgb(0.62, 0.64, 0.68));
+    let marker_material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.62, 0.64, 0.68),
+        metallic: 0.8,
+        perceptual_roughness: 0.3,
+        ..default()
+    });
 
     // Sousedství přes beamy PODLE ID (axle nody v solveru nejsou, ale jejich beamy
     // v surových datech ano — právě přes ně se dojde k suspension nodům).
@@ -1314,7 +1340,13 @@ pub fn spawn_softbody(
         mesh.compute_normals();
         commands.spawn((
             Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(materials.add(Color::srgb(0.75, 0.75, 0.8))),
+            // Lak karoserie: nízký roughness = lesk, mírný metallic = clearcoat look (ne čistý kov).
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgb(0.75, 0.75, 0.8),
+                metallic: 0.2,
+                perceptual_roughness: 0.35,
+                ..default()
+            })),
             Transform::IDENTITY,
             SoftbodyMesh { nodes: vertex_nodes },
             NoFrustumCulling, // mesh se deformuje (vrcholy se mění, Transform pevný) → culling ho jinak občas schová
