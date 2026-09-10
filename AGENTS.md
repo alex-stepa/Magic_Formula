@@ -14,6 +14,26 @@ not receive finished solutions.
 - Exception: purely "meta" tasks (documentation, README, comments, folder structure)
   may be done directly when he asks for it.
 
+## Rule #1b — spec-driven (OpenSpec) implementation mode
+
+Every OpenSpec proposal declares `Implementation mode: guide` or `Implementation mode:
+autopilot`. **Default = guide.** `/opsx:apply` follows the declared mode.
+
+**Autopilot allowed** (Claude writes the code) — only where there's nothing new to learn:
+- Refactors with NO behavior change (splitting files/functions, moving code, renames)
+- Boilerplate and wiring: serde structs, config/catalog JSON, plumbing existing data into UI
+- Tests that pin down *existing* behavior
+- Docs, README, comments
+
+**Always guide** (author writes, Claude explains and reviews), even inside an autopilot change:
+- Solver, tire model, suspension geometry, drivetrain, thermal and audio models — any physics/math
+- New systems or new architectural decisions (new resources, new traits, new data flow)
+- Anything touching the architecture invariants below
+
+If an autopilot change hits a guide-only area → stop, say so, switch that task to guide.
+Autopilot output still has to pass `cargo check` + `cargo test`, and the author reviews
+the diff before it's committed.
+
 ## About the project
 
 Magic Formula = rally + freeroam car physics sim in Rust, inspired by BeamNG.
