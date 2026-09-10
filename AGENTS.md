@@ -35,12 +35,20 @@ Full context, roadmap and scope: see [README.md](README.md).
 
 ```
 src/
-├── main.rs    ← App setup, UI/menu, HUD, camera, render sync (transforms + mesh)
-├── solver.rs  ← physics core: SoftBody (SoA), node-beam solver, tire model (Pacejka)
-├── vehicle.rs ← the car: suspension types + builders, drivetrain (engine/clutch), controls
-├── world.rs   ← terrain as a trait: World { height, normal }, FlatWorld / Hills
-├── physics.rs ← static world (ground) ONLY, as a function -> impl Bundle for rapier
-└── veh.rs     ← loading the custom .veh (serde Deserialize)
+├── main.rs     ← App setup, UI/menu, HUD, camera, render sync (transforms + mesh)
+├── solver.rs   ← physics core: SoftBody (SoA), node-beam solver, tire model (Pacejka)
+├── vehicle.rs  ← the car: suspension types + builders, drivetrain (engine/clutch), controls
+├── world.rs    ← terrain as a trait: World { height, normal }, FlatWorld / Hills
+├── physics.rs  ← static world (ground) ONLY, as a function -> impl Bundle for rapier
+├── veh.rs      ← loading the custom .veh (serde Deserialize)
+├── thermal.rs  ← thermal model: brake/tire/cooler parts → temp → fade/grip/wear
+├── audio.rs    ← engine sound: granular synth (combustion grains) via direct cpal, tire/gear/crash/wind
+├── effects.rs  ← tire visual effects: skid marks + smoke (untested headless, needs drive test)
+├── keybinds.rs ← rebindable controls: gameplay action → key, defaults = old hardcoded keys
+├── parts.rs    ← JSON part catalog (assets/parts/*.json) → PartOption cards → Loadout
+├── saves.rs    ← named build save/export/import (player/builds/*.json)
+├── stats.rs    ← derived build KPIs for garage (power, weight, distribution, 0–100)
+└── ui/         ← garage.rs, garage_preview.rs, dyno.rs, hud.rs, settings.rs, title.rs
 ```
 
 Note: the `.jbeam` → `.veh` converter lives in its own repository,
