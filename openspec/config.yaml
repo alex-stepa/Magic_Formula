@@ -31,18 +31,18 @@ context: |
 
 rules:
   proposal:
-    - Always include a "Non-goals" section
-    - State which architecture invariants the change touches, if any
-    - Declare "Implementation mode: guide" or "Implementation mode: autopilot" (default guide). Autopilot only for behavior-preserving refactors, boilerplate/wiring, tests of existing behavior, docs — per AGENTS.md rule #1b
+    - 'Always include a "Non-goals" section'
+    - 'State which architecture invariants the change touches, if any'
+    - 'Declare "Implementation mode: guide" or "Implementation mode: autopilot" (default guide). Autopilot only for behavior-preserving refactors, boilerplate/wiring, tests of existing behavior, docs — per AGENTS.md rule #1b'
   tasks:
-    - Small steps — each task is one reviewable unit the author can write in one sitting
-    - Every task names how it is verified (cargo check, cargo test <name>, or a concrete drive test)
-    - In an autopilot change, mark any task that touches physics/math or a new system with [guide]
+    - 'Small steps — each task is one reviewable unit the author can write in one sitting'
+    - 'Every task names how it is verified (cargo check, cargo test <name>, or a concrete drive test)'
+    - 'In an autopilot change, mark any task that touches physics/math or a new system with [guide]'
 
 operations:
   apply:
     guidance:
-      - Read "Implementation mode" from proposal.md before touching code. Missing = guide.
-      - Guide mode (and every [guide] task) - do NOT write the code. Explain WHAT and WHY for one task, wait for the author to say done, review his code against the spec, then mark the task complete.
-      - Autopilot mode - implement the task, run cargo check and cargo test, show the diff for the author's review, never commit on your own.
-      - If an autopilot task turns out to touch solver, tire, suspension geometry, drivetrain, thermal or audio math, or an architecture invariant - stop and switch that task to guide.
+      - 'Read "Implementation mode" from proposal.md before touching code. Missing = guide.'
+      - 'Guide mode (and every [guide] task): do NOT write the code. Explain WHAT and WHY for one task, wait for the author to say done, review his code against the spec, then mark the task complete.'
+      - 'Autopilot mode: implement the task, run cargo check and cargo test, show the diff for the author''s review, never commit on your own.'
+      - 'If an autopilot task turns out to touch solver, tire, suspension geometry, drivetrain, thermal or audio math, or an architecture invariant: stop and switch that task to guide.'
