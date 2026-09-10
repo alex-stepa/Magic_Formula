@@ -92,9 +92,14 @@ engine sound (granular synth via cpal), garage build system 4.0/4.1a/4.1b/4.2 do
 (JSON part catalog, tabs, `CarBuild`/`Loadout` pattern, suspension kinds Rigid/Coil/
 McPherson/DoubleWishbone/TorsionBeam/LeafSpring, delta numbers on part cards).
 
-**Now (4.1c, polish):** hover delta in the garage spec table; named saved builds +
-JSON export/import (`src/saves.rs` backend exists — `SavedBuild`/`save`/`load`/`list`,
-garage UI wiring still needed).
+**Done since:** 4.1c (hover delta in the spec table, named saved builds + JSON
+export/import wired into the garage) and rebindable controls (`keybinds.rs` + rebind UI).
+
+**Now:** visual polish on branch `worktree-visual-polish` (fog, HDR tonemapping, bloom,
+SSAO+TAA, PBR materials) — rebased on master, needs a drive/FPS test before merge.
+`effects.rs` (skid marks + smoke) still needs a drive test too.
+
+**Next:** Phase 3 — world (OSM roads, one real location).
 
 **Blocked (4.3):** hardpoints — waiting on a second real `.jbeam` mod to test against.
 

@@ -38,7 +38,17 @@ tire sizes). Porting these into `jbeam2veh` is planned.
 | Map (base) | `World` trait — flat / procedural hills / SRTM heightfield |
 | Map (future) | OpenStreetMap roads + real locations |
 | Serialization | serde + serde_json |
-| CLI (jbeam-rs) | clap |
+| Audio | cpal (direct, low-latency granular engine synth) |
+
+---
+
+## Setup — what's not in git
+
+- **SRTM terrain** — `assets/N50E014.hgt` is gitignored (~26 MB). Download the SRTM1
+  (1 arc-sec, 3601×3601) tile **N50E014** from earthexplorer.usgs.gov into `assets/`.
+  Without it, the "Real terrain" map falls back to the test hill.
+- **`assets/fabia.veh`** — converted from a third-party BeamNG mod. Dev/test asset only:
+  fine in this private repo, **must not ship** in any public or Steam build.
 
 ---
 
@@ -135,12 +145,20 @@ struct CarBuild { suspension: SuspensionKind } // resource: vybrané díly (buil
 
 ```
 src/
-├── main.rs    ← App setup, UI/menu, HUD, camera, render sync
-├── solver.rs  ← physics core: SoftBody (SoA), node-beam solver, tire model
-├── vehicle.rs ← the car: suspension + builders, drivetrain, controls
-├── world.rs   ← terrain as a trait (FlatWorld / Hills / later OSM heightfield)
-├── physics.rs ← static world (ground) only, as impl Bundle for rapier
-└── veh.rs     ← loading the custom .veh (serde)
+├── main.rs     ← App setup, UI/menu, HUD, camera, render sync
+├── solver.rs   ← physics core: SoftBody (SoA), node-beam solver, tire model
+├── vehicle.rs  ← the car: suspension + builders, drivetrain, controls
+├── world.rs    ← terrain as a trait (FlatWorld / Hills / SRTM HeightField)
+├── physics.rs  ← static world (ground) only, as impl Bundle for rapier
+├── veh.rs      ← loading the custom .veh (serde)
+├── thermal.rs  ← brake/tire/cooler thermals → fade/grip/wear
+├── audio.rs    ← engine sound: granular synth via cpal + tire/gear/crash/wind
+├── effects.rs  ← skid marks + tire smoke
+├── keybinds.rs ← rebindable controls
+├── parts.rs    ← JSON part catalog (assets/parts/*.json) → Loadout
+├── saves.rs    ← named build save/export/import (player/builds/*.json)
+├── stats.rs    ← derived build KPIs for the garage
+└── ui/         ← garage, garage_preview, dyno, hud, settings, title
 ```
 
 ---
@@ -237,14 +255,17 @@ Struktura obrazovek podle návrhu:
 ### Phase 3 — World
 - OSM data loader, road mesh from OSM ways, one real location (SRTM elevation already in).
 
-### Phase 4 — Build system ← **IN PROGRESS** (4.0/4.1a/4.1b/4.2 done, 4.1c polish
-ongoing; then game-defining polish: settings, controls; Phase 3 world after)
+### Phase 4 — Build system ← **IN PROGRESS** (4.0/4.1a/4.1b/4.1c/4.2 done, controls
+done; visual polish in review; 4.3 blocked → Phase 3 world next)
 - ✅ JSON part catalog (`assets/parts/*.json`), garage tabs, `CarBuild`/`Loadout`
   pattern (part = data, resource holds the choice, builder reads), delta numbers on
   part cards, thermal model (brake/tire/cooler parts), engine sound (granular synth
   via cpal)
-- **4.1c (current)**: hover delta in the spec table, named saved builds + JSON
-  export/import (`src/saves.rs` backend already there)
+- ✅ **4.1c**: hover delta in the spec table, named saved builds + JSON
+  export/import (`src/saves.rs` + garage UI)
+- ✅ Rebindable controls (`src/keybinds.rs` + rebind UI in Settings)
+- **Visual polish (in review)**: branch `worktree-visual-polish` — fog, HDR tonemapping,
+  bloom, SSAO+TAA, PBR materials; needs a drive/FPS test before merge
 - **4.3 (blocked)**: hardpoints — waiting on a second real `.jbeam` mod to test against
 
 ### Phase 5 — Game modes
