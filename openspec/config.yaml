@@ -1,0 +1,37 @@
+schema: spec-driven
+
+# Project context — shown to AI when creating artifacts.
+# Zdroj pravdy: README.md (roadmap) + AGENTS.md (pravidla). Při rozporu vyhrávají ty.
+context: |
+  Magic Formula — rally + freeroam car physics sim, BeamNG-inspired. Solo dev, goal: Steam.
+  Stack: Rust (edition 2024), Bevy 0.15, serde/serde_json, cpal (engine audio).
+  Vehicle physics: custom node-beam solver (semi-implicit Euler + adaptive CFL substepping).
+  bevy_rapier3d 0.28 is ONLY for the static world/ground — vehicles never go through rapier.
+
+  Architecture invariants (do not break without an explicit design decision):
+  - Vehicle physics state lives in ONE resource `SoftBody` (Structure-of-Arrays:
+    pos/vel/inv_mass/force/beams/wheels). Beams and wheels reference nodes by index.
+  - The solver is a dumb integrator. Variability (parts, tuning, suspension kinds)
+    belongs in builders at spawn time (`spawn_solver_car`, `build_suspension`), never
+    in the solver loop.
+  - Render = entities; Transforms are overwritten from solver positions every frame.
+  - Terrain is behind the `World` trait (height/normal).
+  - Parts = data: JSON catalog in assets/parts/*.json, `CarBuild`/`Loadout` resources
+    hold the choice, builders read it.
+  - Real stiffness values from .veh — no scaling hacks; stability via substepping and
+    damping d = 2·ζ·√(k·μ).
+  - Custom .veh format (JSON), loaded by src/veh.rs; all new fields must be optional
+    so old .veh files keep loading.
+
+  Conventions: code comments in Czech. Physics is heavy → run/verify with
+  `cargo run --release`; `cargo check` + `cargo test` must stay green (currently 0 warnings).
+  Collider::cuboid takes HALF extents.
+  Working mode per AGENTS.md rule #1: GUIDE, not autopilot — the author writes the code.
+
+rules:
+  proposal:
+    - Always include a "Non-goals" section
+    - State which architecture invariants the change touches, if any
+  tasks:
+    - Small steps — each task is one reviewable unit the author can write in one sitting
+    - Every task names how it is verified (cargo check, cargo test <name>, or a concrete drive test)

@@ -11,8 +11,9 @@ telemetry/
 # uložené buildy hráče (player data)
 player/
 
-# claude code lokální stav (settings.local.json, worktrees)
-.claude/
+# claude code lokální stav (commands/ a skills/ = OpenSpec, ty se verzují)
+.claude/settings.local.json
+.claude/worktrees/
 
 # graphify analýza (vygenerovaný výstup)
 graphify-out/
