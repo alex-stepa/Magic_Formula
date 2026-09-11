@@ -11,7 +11,8 @@ Driving input is data, not hardcoded keys: gameplay actions map to keys through 
 Every rebindable gameplay input MUST be read as an `Action` via `KeyBindings`
 (`pressed` / `just_pressed`), never as a literal `KeyCode` in a gameplay system. The 13
 actions are Throttle, Brake, SteerLeft, SteerRight, Clutch, ShiftUp, ShiftDown, Start,
-Handbrake, DiffLock, DriveLayout, Camera, Telemetry.
+Handbrake, DiffLock, DriveLayout, Camera, Telemetry. The only exceptions today are the
+driver aid toggles (see below).
 
 #### Scenario: A system reads driver input
 
@@ -24,6 +25,18 @@ Handbrake, DiffLock, DriveLayout, Camera, Telemetry.
 - **WHEN** a change introduces a new driving input
 - **THEN** it MUST be added to `Action::ALL` with a Czech UI label, so it appears in the
   rebind list automatically
+
+### Requirement: Driver aid toggles are not rebindable yet
+
+The ABS and TC toggles are read as literal `KeyCode::KeyB` / `KeyCode::KeyN` inside
+`vehicle_drive`, so they are gameplay inputs that escaped the action layer. This is a known
+gap: a change that makes them rebindable MUST add them to `Action::ALL` with labels and
+switch `vehicle_drive` to `bindings.just_pressed`.
+
+#### Scenario: Player rebinds driving keys
+
+- **WHEN** the player remaps controls in Settings
+- **THEN** ABS (B) and TC (N) do not appear in the list and stay on their hardcoded keys
 
 ### Requirement: System and dev keys stay hardcoded
 
