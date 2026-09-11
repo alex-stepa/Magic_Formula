@@ -71,8 +71,10 @@ src/
 └── ui/         ← garage.rs, garage_preview.rs, dyno.rs, hud.rs, settings.rs, title.rs
 ```
 
-Note: the `.jbeam` → `.veh` converter lives in its own repository,
-[`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) — no longer part of this tree.
+Note: the Rust `.jbeam` → `.veh` converter lives in its own repository,
+[`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh). But `tools/jbeam_to_veh.py` **stays
+in this tree** — the Python script is still ahead of the Rust crate (slot selection, tire
+sizes) and is the reference implementation until those are ported. See README "converter".
 
 ## Architecture — how the car actually works
 
@@ -102,7 +104,24 @@ Note: the `.jbeam` → `.veh` converter lives in its own repository,
 ```bash
 cargo run --release   # physics is heavy (large .veh = hundreds of substeps/frame) → release!
 cargo check           # quick check that it compiles
+cargo test            # unit tests (solver, thermal, audio, veh)
 ```
+
+## Spec-driven workflow (OpenSpec)
+
+Behaviour is specified, not just coded. Source of truth for *what the game does* =
+`openspec/specs/<capability>/spec.md`; README stays roadmap + context, AGENTS.md stays rules.
+
+```bash
+/opsx:propose <name>   # new change: proposal.md + delta specs + tasks.md
+/opsx:apply <name>     # implement, following "Implementation mode" from the proposal (rule #1b)
+/opsx:archive <name>   # done → fold deltas into main specs, move change to archive
+openspec validate --specs   # specs must stay valid
+openspec list --specs       # what capabilities exist
+```
+
+Project context and architecture invariants for these artifacts live in
+`openspec/config.yaml`. A change that touches an invariant has to say so in its proposal.
 
 ## Current phase
 
@@ -115,9 +134,12 @@ McPherson/DoubleWishbone/TorsionBeam/LeafSpring, delta numbers on part cards).
 **Done since:** 4.1c (hover delta in the spec table, named saved builds + JSON
 export/import wired into the garage) and rebindable controls (`keybinds.rs` + rebind UI).
 
-**Now:** visual polish on branch `worktree-visual-polish` (fog, HDR tonemapping, bloom,
-SSAO+TAA, PBR materials) — rebased on master, needs a drive/FPS test before merge.
-`effects.rs` (skid marks + smoke) still needs a drive test too.
+**Now:** transition to spec-driven work — baseline specs for existing capabilities in
+`openspec/specs/` so future changes are deltas against the real behaviour.
+
+**Parked:** visual polish (fog, HDR tonemapping, bloom, SSAO+TAA, PBR materials) — one
+commit on `origin/worktree-visual-polish`, local branch and worktree deleted; never merged,
+never drive-tested. `effects.rs` (skid marks + smoke) still needs a drive test too.
 
 **Next:** Phase 3 — world (OSM roads, one real location).
 

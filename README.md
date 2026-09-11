@@ -25,6 +25,22 @@ tire sizes). Porting these into `jbeam2veh` is planned.
 
 ---
 
+## Spec-driven development (OpenSpec)
+
+Since September 2026 the project runs spec-driven: behaviour is written down as specs
+before it's coded.
+
+- `openspec/specs/<capability>/spec.md` — **source of truth for what the game does**
+  (requirements + WHEN/THEN scenarios), one spec per capability.
+- `openspec/changes/<name>/` — a change in flight: proposal, delta specs, tasks.
+- `openspec/config.yaml` — project context + architecture invariants handed to the AI.
+- This README stays the roadmap and context; [AGENTS.md](AGENTS.md) stays the working rules.
+
+Flow: `/opsx:propose` → `/opsx:apply` → `/opsx:archive` (deltas fold into the main specs).
+Each proposal declares `Implementation mode: guide | autopilot` — see AGENTS.md rule #1b.
+
+---
+
 ## Tech Stack
 
 | What | With |
@@ -256,7 +272,7 @@ Struktura obrazovek podle návrhu:
 - OSM data loader, road mesh from OSM ways, one real location (SRTM elevation already in).
 
 ### Phase 4 — Build system ← **IN PROGRESS** (4.0/4.1a/4.1b/4.1c/4.2 done, controls
-done; visual polish in review; 4.3 blocked → Phase 3 world next)
+done; visual polish parked; 4.3 blocked → Phase 3 world next)
 - ✅ JSON part catalog (`assets/parts/*.json`), garage tabs, `CarBuild`/`Loadout`
   pattern (part = data, resource holds the choice, builder reads), delta numbers on
   part cards, thermal model (brake/tire/cooler parts), engine sound (granular synth
@@ -264,8 +280,9 @@ done; visual polish in review; 4.3 blocked → Phase 3 world next)
 - ✅ **4.1c**: hover delta in the spec table, named saved builds + JSON
   export/import (`src/saves.rs` + garage UI)
 - ✅ Rebindable controls (`src/keybinds.rs` + rebind UI in Settings)
-- **Visual polish (in review)**: branch `worktree-visual-polish` — fog, HDR tonemapping,
-  bloom, SSAO+TAA, PBR materials; needs a drive/FPS test before merge
+- **Visual polish (parked)**: one commit on `origin/worktree-visual-polish` — fog, HDR
+  tonemapping, bloom, SSAO+TAA, PBR materials. Local branch/worktree deleted; never merged
+  and never drive-tested. To pick it up: `git fetch && git switch worktree-visual-polish`
 - **4.3 (blocked)**: hardpoints — waiting on a second real `.jbeam` mod to test against
 
 ### Phase 5 — Game modes
