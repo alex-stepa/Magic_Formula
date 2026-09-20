@@ -53,8 +53,9 @@ None.
 None. This is input plumbing above the solver; `SoftBody`, the builders and the tire model
 are untouched.
 
-## Implementation mode: guide
+## Verification
 
-Per AGENTS.md rule #1b this is close to boilerplate/wiring, but it edits `vehicle_drive`
-(a gameplay system) and adding enum variants plus `HashMap` defaults is exactly the kind of
-small Rust exercise the author should write himself. Claude explains each step and reviews.
+`cargo check` + `cargo test` catch the mechanical part (a missing `label()` arm or wrong
+`ALL` length will not compile). The rest needs the game: rebind ABS to another key, drive,
+confirm the new key toggles it and the old one does not — plus one run with a pre-existing
+`player/settings.json` to prove old bindings survive.

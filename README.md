@@ -37,7 +37,7 @@ before it's coded.
 - This README stays the roadmap and context; [AGENTS.md](AGENTS.md) stays the working rules.
 
 Flow: `/opsx:propose` → `/opsx:apply` → `/opsx:archive` (deltas fold into the main specs).
-Each proposal declares `Implementation mode: guide | autopilot` — see AGENTS.md rule #1b.
+Working mode: Claude implements, the author reviews the diff — see AGENTS.md rule #1.
 
 ---
 

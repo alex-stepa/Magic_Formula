@@ -1,38 +1,17 @@
 # AGENTS.md — instructions for AI assistants on the Magic Formula project
 
-## ⚠️ Rule #1 — working mode: GUIDE, not autopilot
+## Rule #1 — working mode: write the code
 
-The author is a 15-year-old developer learning Rust + Bevy who wants to **actually grow**,
-not receive finished solutions.
+Claude implements. No step-by-step walkthroughs, no waiting for the author to type it out.
 
-- **DO NOT code for him.** Tell him WHAT to do and WHY; he writes the code himself.
-- Proceed in **small steps** — one step, wait for "done", then the next.
-- Write a finished snippet **only** when he gets stuck on something Rust-specific he
-  hasn't seen yet (e.g. a new return type, lifetime, trait). Explain it, but let him
-  finish the core logic himself.
-- After he writes code, **review it** and guide him to fixes; don't fix silently.
-- Exception: purely "meta" tasks (documentation, README, comments, folder structure)
-  may be done directly when he asks for it.
-
-## Rule #1b — spec-driven (OpenSpec) implementation mode
-
-Every OpenSpec proposal declares `Implementation mode: guide` or `Implementation mode:
-autopilot`. **Default = guide.** `/opsx:apply` follows the declared mode.
-
-**Autopilot allowed** (Claude writes the code) — only where there's nothing new to learn:
-- Refactors with NO behavior change (splitting files/functions, moving code, renames)
-- Boilerplate and wiring: serde structs, config/catalog JSON, plumbing existing data into UI
-- Tests that pin down *existing* behavior
-- Docs, README, comments
-
-**Always guide** (author writes, Claude explains and reviews), even inside an autopilot change:
-- Solver, tire model, suspension geometry, drivetrain, thermal and audio models — any physics/math
-- New systems or new architectural decisions (new resources, new traits, new data flow)
-- Anything touching the architecture invariants below
-
-If an autopilot change hits a guide-only area → stop, say so, switch that task to guide.
-Autopilot output still has to pass `cargo check` + `cargo test`, and the author reviews
-the diff before it's committed.
+- **Write the code**, then show what changed and why in a few lines.
+- `cargo check` + `cargo test` must stay green (0 warnings) before anything is called done.
+- Physics changes are verified by a real drive test (`cargo run --release`), not by
+  reasoning — same for sound (listen to the render tests) and visuals.
+- The author reviews the diff. **Never commit or push unless asked.**
+- Explain the non-obvious parts (a new trait, a lifetime, a solver invariant) briefly in the
+  summary — enough to review the diff, not a tutorial.
+- Say when something is uncertain or untested rather than presenting it as verified.
 
 ## About the project
 
@@ -114,7 +93,7 @@ Behaviour is specified, not just coded. Source of truth for *what the game does*
 
 ```bash
 /opsx:propose <name>   # new change: proposal.md + delta specs + tasks.md
-/opsx:apply <name>     # implement, following "Implementation mode" from the proposal (rule #1b)
+/opsx:apply <name>     # implement the tasks (rule #1: Claude writes the code)
 /opsx:archive <name>   # done → fold deltas into main specs, move change to archive
 openspec validate --specs   # specs must stay valid
 openspec list --specs       # what capabilities exist
