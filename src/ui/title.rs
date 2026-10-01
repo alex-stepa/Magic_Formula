@@ -1,8 +1,6 @@
 // Title screen podle návrhu: logo + režimy (Volná jízda / Garáž / Rally / Nastavení)
 // + map picker vpravo + přehled kláves v patičce.
 
-use bevy::prelude::*;
-
 use crate::ui::*;
 use crate::world::{MapKind, Terrain};
 

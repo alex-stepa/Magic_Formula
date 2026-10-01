@@ -5,7 +5,6 @@
 use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
-use bevy::prelude::*;
 
 use crate::parts::{PartCatalog, PartCategory, PartData};
 use crate::ui::*;

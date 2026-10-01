@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
 use serde::{Deserialize, Serialize};

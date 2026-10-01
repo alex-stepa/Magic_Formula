@@ -2,7 +2,6 @@
 // shift LED, velká rychlost, kvalt) + telemetrie overlay na T + pauza na Esc.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
-use bevy::prelude::*;
 
 use crate::solver::SoftBody;
 use crate::ui::settings::SettingsUi;
