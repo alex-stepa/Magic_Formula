@@ -17,3 +17,6 @@ player/
 
 # graphify analýza (vygenerovaný výstup)
 graphify-out/
+
+# převedená auta z cizích BeamNG modů (licence) — necommitovat
+assets/*.veh

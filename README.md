@@ -1,16 +1,17 @@
 # Magic Formula
 
 Rally + freeroam game with a modular car physics architecture inspired by BeamNG.
-Own format, own implementation, own identity. Potential Steam release.
+Own format, own implementation, own identity. Open source, built in the open; a
+Steam release is a possible later goal.
 
-- **Name:** Magic Formula
-- **Parts:** `magic-formula` (game) + [`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) (`.jbeam` → `.veh` converter, separate repo)
+- **Name:** Magic Formula (after the Pacejka tire model it uses)
+- **Parts:** this repo (the game) + [`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) (`.jbeam` → `.veh` converter, separate repo)
 
 ---
 
 ## Project parts
 
-### 1. `magic-formula` — the main game
+### 1. This repo — the game
 Rust + Bevy, custom `.veh` format, node-beam physics on a **custom solver**
 (rapier remains only for the static world/ground).
 
@@ -18,10 +19,12 @@ Rust + Bevy, custom `.veh` format, node-beam physics on a **custom solver**
 Parses BeamNG `.jbeam` files and converts them into the custom `.veh` format.
 Standalone crate in its **own repository**, no dependency on the game.
 
-**Current state:** the Rust crate is the goal, but the actively used converter today is
-`tools/jbeam_to_veh.py` in this repo — it's ahead of the Rust version (slot selection,
-`$variable` resolution, precompression → `rest`, rebound damping, per-axle brakes,
-tire sizes). Porting these into `jbeam2veh` is planned.
+**Current state:** the Rust crate is the long-term converter, but it only does the basics
+(nodes, beams, wheels, triangles). The full-featured converter today is
+[`tools/jbeam_to_veh.py`](tools/jbeam_to_veh.py) in this repo — it adds slot selection,
+`$variable` resolution, precompression → `rest`, rebound damping, per-axle brakes and
+tire sizes. Porting these into `jbeam2veh` is planned. Use the Python script for real
+BeamNG cars, the Rust crate for quick basic conversions.
 
 ---
 
@@ -63,8 +66,16 @@ Working mode: Claude implements, the author reviews the diff — see AGENTS.md r
 - **SRTM terrain** — `assets/N50E014.hgt` is gitignored (~26 MB). Download the SRTM1
   (1 arc-sec, 3601×3601) tile **N50E014** from earthexplorer.usgs.gov into `assets/`.
   Without it, the "Real terrain" map falls back to the test hill.
-- **`assets/fabia.veh`** — converted from a third-party BeamNG mod. Dev/test asset only:
-  fine in this private repo, **must not ship** in any public or Steam build.
+- **Your own car (`.veh`)** — the repo ships no BeamNG content; the built-in "Test car" works
+  out of the box. To drive a real car, convert a `.jbeam` you own and drop the result into
+  `assets/`; it shows up in the garage:
+
+  ```sh
+  python3 tools/jbeam_to_veh.py <folder with .jbeam files> assets/mycar.veh mycar
+  ```
+
+  Third-party mods keep their own licenses — don't commit converted cars to git
+  (`assets/*.veh` is gitignored).
 
 ---
 
@@ -184,9 +195,9 @@ src/
 ### converter — [`jbeam2veh`](https://github.com/alex-stepa/jbeam2veh) (separate repo)
 - [x] `.jbeam` parsing (custom preprocess — jbeam has missing commas, not clean json5)
 - [x] Conversion of nodes, beams, **wheels**, triangles to `.veh`
-- [x] CLI: `jbeam-rs input.jbeam -o output.veh`
+- [x] CLI: `jbeam-rs input.jbeam -o output.veh` (binary name; the crate and repo are `jbeam2veh`)
 - [x] Tested on a real `.jbeam` car (500 nodes, 5871 beams, 4 wheels, 791 triangles)
-- [x] `tools/jbeam_to_veh.py` (in-repo, currently ahead of the Rust crate): slot
+- [x] [`tools/jbeam_to_veh.py`](tools/jbeam_to_veh.py) (in-repo, currently ahead of the Rust crate): slot
   selection, `$variable` resolution, precompression → `rest`, rebound, brakes,
   tire sizes — to be ported into `jbeam2veh`
 

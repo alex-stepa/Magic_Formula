@@ -3,7 +3,7 @@ schema: spec-driven
 # Project context — shown to AI when creating artifacts.
 # Zdroj pravdy: README.md (roadmap) + AGENTS.md (pravidla). Při rozporu vyhrávají ty.
 context: |
-  Magic Formula — rally + freeroam car physics sim, BeamNG-inspired. Solo dev, goal: Steam.
+  Magic Formula — rally + freeroam car physics sim, BeamNG-inspired. Solo dev, public repo, possible Steam release later.
   Stack: Rust (edition 2024), Bevy 0.15, serde/serde_json, cpal (engine audio).
   Vehicle physics: custom node-beam solver (semi-implicit Euler + adaptive CFL substepping).
   bevy_rapier3d 0.28 is ONLY for the static world/ground — vehicles never go through rapier.

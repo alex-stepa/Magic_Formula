@@ -16,7 +16,7 @@ Claude implements. No step-by-step walkthroughs, no waiting for the author to ty
 ## About the project
 
 Magic Formula = rally + freeroam car physics sim in Rust, inspired by BeamNG.
-Modular node-beam physics on a **custom solver**, custom `.veh` format. Goal: possibly Steam.
+Modular node-beam physics on a **custom solver**, custom `.veh` format. Open source (public repo); Steam is a possible later goal.
 
 Full context, roadmap and scope: see [README.md](README.md).
 
