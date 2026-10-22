@@ -2,6 +2,11 @@
 // Tady se sestaví Bevy App, zapnou pluginy a zaregistrují systémy.
 
 use bevy::prelude::*;          // základ Bevy: App, Commands, Transform, Component...
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::core_pipeline::bloom::Bloom;
+use bevy::core_pipeline::experimental::taa::TemporalAntiAliasing;
+use bevy::core_pipeline::prepass::{DepthPrepass, NormalPrepass};
+use bevy::pbr::ScreenSpaceAmbientOcclusion;
 use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor}; // opakující se textura zem
 use bevy::render::render_asset::RenderAssetUsages; // mesh zůstane i v main světě (ať ho updatujeme)
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat}; // tvorba textury země
@@ -25,6 +30,14 @@ use solver::*;
 use vehicle::*;
 use world::{MapKind, Terrain};
 
+// Barva oblohy — sdílená mezi ClearColor (pozadí) a DistanceFog (splyne s horizontem).
+const SKY_COLOR: Color = Color::srgb(0.55, 0.7, 0.85);
+
+// Hlavní herní kamera (na rozdíl od garage-preview kamery). Používá SSAO+TAA místo
+// MSAA — Nastavení→OBECNÉ MSAA přepínač se jí proto netýká (viz apply_video v settings.rs).
+#[derive(Component)]
+pub struct MainCamera;
+
 fn main() {
     let mut app = App::new();
     app
@@ -38,6 +51,8 @@ fn main() {
             }),
             ..default()
         }))
+        .insert_resource(ClearColor(SKY_COLOR))
+        // TAA a SSAO plugin registruje DefaultPlugins samo (core pipeline) — jen komponenty na kameře stačí.
         // Zapne fyzikální simulaci (gravitace, srážky). Od teď rapier hýbe tělesy.
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::default())
         // Startup = spustí se jednou na začátku (postaví scénu).
@@ -94,7 +109,28 @@ fn setup(
     mut colliders: ResMut<WorldColliders>,
 ) {
     // Kamera ve výšce 8, kus dozadu (z=15), kouká do středu světa (0,0,0).
-    commands.spawn(Camera3d::default()).insert(Transform::from_xyz(0.0, 8.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y));
+    // Fog barvou ladí s ClearColor — obloha na horizontu splyne se zamlžením dálky
+    // (deska 4000×4000 by jinak byla vidět "do nekonečna" bez hloubkové orientace).
+    commands.spawn((
+        Camera3d::default(),
+        Camera { hdr: true, ..default() }, // HDR musí být zapnuté, jinak tonemapping/bloom nic nedělá
+        Tonemapping::TonyMcMapface,
+        Bloom::NATURAL,
+        Transform::from_xyz(0.0, 8.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        DistanceFog {
+            color: SKY_COLOR,
+            falloff: FogFalloff::Linear { start: 150.0, end: 600.0 },
+            ..default()
+        },
+        MainCamera,
+        // SSAO chce Msaa::Off + depth/normal prepass; TAA (místo MSAA) hrany dovyhladí.
+        // Nastavení→OBECNÉ MSAA přepínač na tuhle kameru nesahá (viz MainCamera + apply_video).
+        Msaa::Off,
+        DepthPrepass,
+        NormalPrepass,
+        ScreenSpaceAmbientOcclusion::default(),
+        TemporalAntiAliasing::default(),
+    ));
 
     // Směrové světlo (jako slunce) — svítí pod úhlem daným rotací.
     commands.spawn((

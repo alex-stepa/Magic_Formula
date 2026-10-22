@@ -580,10 +580,12 @@ fn update_video_labels(vs: Res<VideoSettings>, mut labels: Query<(&mut Text, &Vi
 }
 
 // Zrcadli VideoSettings do skutečného okna a MSAA (jen při změně).
+// Hlavní herní kamera (MainCamera) má natrvalo Msaa::Off + SSAO/TAA — přepínač se
+// týká jen ostatních kamer (garage preview).
 fn apply_video(
     vs: Res<VideoSettings>,
     mut win: Query<&mut Window, With<PrimaryWindow>>,
-    mut msaa: Query<&mut Msaa>,
+    mut msaa: Query<&mut Msaa, Without<crate::MainCamera>>,
 ) {
     if !vs.is_changed() {
         return;
