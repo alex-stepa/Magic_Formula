@@ -1363,11 +1363,11 @@ pub fn vehicle_drive(
     let throttle = if test.0 || bindings.pressed(&keys, Action::Throttle) { 1.0 } else { 0.0 };
     let braking = bindings.pressed(&keys, Action::Brake);
     let parking = bindings.pressed(&keys, Action::Handbrake); // ruční brzda — jen zadní náprava
-    if keys.just_pressed(KeyCode::KeyB) {
+    if bindings.just_pressed(&keys, Action::Abs) {
         aids.abs = !aids.abs;
         info!("ABS: {}", if aids.abs { "ON" } else { "OFF" });
     }
-    if keys.just_pressed(KeyCode::KeyN) {
+    if bindings.just_pressed(&keys, Action::Tc) {
         aids.tc = !aids.tc;
         info!("TC: {}", if aids.tc { "ON" } else { "OFF" });
     }

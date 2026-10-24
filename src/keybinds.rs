@@ -77,14 +77,14 @@ impl Key {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     Throttle, Brake, SteerLeft, SteerRight, Clutch, ShiftUp, ShiftDown, Start,
-    Handbrake, DiffLock, DriveLayout, Camera, Telemetry,
+    Handbrake, DiffLock, DriveLayout, Camera, Telemetry, Abs, Tc,
 }
 
 impl Action {
-    pub const ALL: [Action; 13] = [
+    pub const ALL: [Action; 15] = [
         Action::Throttle, Action::Brake, Action::SteerLeft, Action::SteerRight, Action::Clutch,
         Action::ShiftUp, Action::ShiftDown, Action::Start, Action::Handbrake, Action::DiffLock,
-        Action::DriveLayout, Action::Camera, Action::Telemetry,
+        Action::DriveLayout, Action::Camera, Action::Telemetry, Action::Abs, Action::Tc,
     ];
 
     pub fn label(self) -> &'static str {
@@ -102,6 +102,8 @@ impl Action {
             Action::DriveLayout => "Rozvod pohonu",
             Action::Camera => "Kamera",
             Action::Telemetry => "Telemetrie",
+            Action::Abs => "ABS",
+            Action::Tc => "Kontrola trakce",
         }
     }
 }
@@ -116,7 +118,7 @@ impl Default for KeyBindings {
         Self(HashMap::from([
             (Throttle, W), (Brake, S), (SteerLeft, A), (SteerRight, D), (Clutch, ShiftLeft),
             (ShiftUp, E), (ShiftDown, Q), (Start, R), (Handbrake, Space), (DiffLock, L),
-            (DriveLayout, K), (Camera, C), (Telemetry, T),
+            (DriveLayout, K), (Camera, C), (Telemetry, T), (Abs, B), (Tc, N),
         ]))
     }
 }
